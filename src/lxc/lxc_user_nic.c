@@ -414,7 +414,7 @@ static int get_mtu(char *name)
 	return netdev_get_mtu(idx);
 }
 
-static bool create_nic(char *nic, char *br, int pid, char **cnic)
+static bool create_nic(char *nic, char *br, int pid, const char *wantedname)
 {
 	char *veth1buf, *veth2buf;
 	veth1buf = alloca(IFNAMSIZ);
@@ -452,12 +452,11 @@ static bool create_nic(char *nic, char *br, int pid, char **cnic)
 	}
 
 	/* pass veth2 to target netns */
-	ret = lxc_netdev_move_by_name(veth2buf, pid, NULL);
+	ret = lxc_netdev_move_by_name(veth2buf, pid, wantedname);
 	if (ret < 0) {
 		fprintf(stderr, "Error moving %s to netns %d\n", veth2buf, pid);
 		goto out_del;
 	}
-	*cnic = strdup(veth2buf);
 	return true;
 
 out_del:
@@ -470,13 +469,13 @@ out_del:
  * *dest will container the name (vethXXXXXX) which is attached
  * on the host to the lxc bridge
  */
-static bool get_new_nicname(char **dest, char *br, int pid, char **cnic)
+static bool get_new_nicname(char **dest, char *br, int pid, const char *wantedname)
 {
 	char template[IFNAMSIZ];
 	snprintf(template, sizeof(template), "vethXXXXXX");
 	*dest = lxc_mkifname(template);
 
-	if (!create_nic(*dest, br, pid, cnic)) {
+	if (!create_nic(*dest, br, pid, wantedname)) {
 		return false;
 	}
 	return true;
@@ -577,7 +576,7 @@ static int count_entries(char *buf, off_t len, char *me, char *t, char *br)
  * The dbfile has lines of the format:
  * user type bridge nicname
  */
-static bool get_nic_if_avail(int fd, struct alloted_s *names, int pid, char *intype, char *br, int allowed, char **nicname, char **cnic)
+static bool get_nic_if_avail(int fd, struct alloted_s *names, int pid, char *intype, char *br, int allowed, char **nicname, const char *wantedname)
 {
 	off_t len, slen;
 	struct stat sb;
@@ -621,7 +620,7 @@ static bool get_nic_if_avail(int fd, struct alloted_s *names, int pid, char *int
 	if (owner == NULL)
 		return false;
 
-	if (!get_new_nicname(nicname, br, pid, cnic))
+	if (!get_new_nicname(nicname, br, pid, wantedname))
 		return false;
 	/* owner  ' ' intype ' ' br ' ' *nicname + '\n' + '\0' */
 	slen = strlen(owner) + strlen(intype) + strlen(br) + strlen(*nicname) + 5;
@@ -667,75 +666,6 @@ again:
 	}
 	*(p++) = '/';
 	goto again;
-}
-
-#define VETH_DEF_NAME "eth%d"
-
-static int rename_in_ns(int pid, char *oldname, char **newnamep)
-{
-	char nspath[MAXPATHLEN];
-	int fd = -1, ofd = -1, ret, ifindex = -1;
-	bool grab_newname = false;
-
-	ret = snprintf(nspath, MAXPATHLEN, "/proc/%d/ns/net", getpid());
-	if (ret < 0 || ret >= MAXPATHLEN)
-		return -1;
-	if ((ofd = open(nspath, O_RDONLY)) < 0) {
-		fprintf(stderr, "Opening %s\n", nspath);
-		return -1;
-	}
-	ret = snprintf(nspath, MAXPATHLEN, "/proc/%d/ns/net", pid);
-	if (ret < 0 || ret >= MAXPATHLEN)
-		goto out_err;
-
-	if ((fd = open(nspath, O_RDONLY)) < 0) {
-		fprintf(stderr, "Opening %s\n", nspath);
-		goto out_err;
-	}
-	if (setns(fd, 0) < 0) {
-		fprintf(stderr, "setns to container network namespace\n");
-		goto out_err;
-	}
-	close(fd); fd = -1;
-	if (!*newnamep) {
-		grab_newname = true;
-		*newnamep = VETH_DEF_NAME;
-		if (!(ifindex = if_nametoindex(oldname))) {
-			fprintf(stderr, "failed to get netdev index\n");
-			goto out_err;
-		}
-	}
-	if ((ret = lxc_netdev_rename_by_name(oldname, *newnamep)) < 0) {
-		fprintf(stderr, "Error %d renaming netdev %s to %s in container\n", ret, oldname, *newnamep);
-		goto out_err;
-	}
-	if (grab_newname) {
-		char ifname[IFNAMSIZ], *namep = ifname;
-		if (!if_indextoname(ifindex, namep)) {
-			fprintf(stderr, "Failed to get new netdev name\n");
-			goto out_err;
-		}
-		*newnamep = strdup(namep);
-		if (!*newnamep)
-			goto out_err;
-	}
-	if (setns(ofd, 0) < 0) {
-		fprintf(stderr, "Error returning to original netns\n");
-		close(ofd);
-		return -1;
-	}
-	close(ofd);
-
-	return 0;
-
-out_err:
-	if (ofd >= 0)
-		close(ofd);
-	if (setns(ofd, 0) < 0)
-		fprintf(stderr, "Error returning to original network namespace\n");
-	if (fd >= 0)
-		close(fd);
-	return -1;
 }
 
 /*
@@ -785,7 +715,6 @@ int main(int argc, char *argv[])
 	bool gotone = false;
 	char *me;
 	char *nicname = alloca(40);
-	char *cnic = NULL; // created nic name in container is returned here.
 	char *vethname = NULL;
 	int pid;
 	struct alloted_s *alloted = NULL;
@@ -837,18 +766,12 @@ int main(int argc, char *argv[])
 
 	n = get_alloted(me, argv[4], argv[5], &alloted);
 	if (n > 0)
-		gotone = get_nic_if_avail(fd, alloted, pid, argv[4], argv[5], n, &nicname, &cnic);
+		gotone = get_nic_if_avail(fd, alloted, pid, argv[4], argv[5], n, &nicname, vethname);
 
 	close(fd);
 	free_alloted(&alloted);
 	if (!gotone) {
 		fprintf(stderr, "Quota reached\n");
-		exit(1);
-	}
-
-	// Now rename the link
-	if (rename_in_ns(pid, cnic, &vethname) < 0) {
-		fprintf(stderr, "Failed to rename the link\n");
 		exit(1);
 	}
 

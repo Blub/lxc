@@ -2216,7 +2216,7 @@ static int setup_netdev(struct lxc_netdev *netdev)
 
 	/* get the new ifindex in case of physical netdev */
 	if (netdev->type == LXC_NET_PHYS) {
-		if (!(netdev->ifindex = if_nametoindex(netdev->link))) {
+		if (!(netdev->ifindex = if_nametoindex(netdev->name))) {
 			ERROR("failed to get ifindex for %s",
 				netdev->link);
 			return -1;
@@ -2234,25 +2234,6 @@ static int setup_netdev(struct lxc_netdev *netdev)
 	if (!netdev->name)
 		netdev->name = netdev->type == LXC_NET_PHYS ?
 			netdev->link : "eth%d";
-
-	/* rename the interface name */
-	if (strcmp(ifname, netdev->name) != 0) {
-		err = lxc_netdev_rename_by_name(ifname, netdev->name);
-		if (err) {
-			ERROR("failed to rename %s->%s : %s", ifname, netdev->name,
-			      strerror(-err));
-			return -1;
-		}
-	}
-
-	/* Re-read the name of the interface because its name has changed
-	 * and would be automatically allocated by the system
-	 */
-	if (!if_indextoname(netdev->ifindex, current_ifname)) {
-		ERROR("no interface corresponding to index '%d'",
-		      netdev->ifindex);
-		return -1;
-	}
 
 	/* set a mac address */
 	if (netdev->hwaddr) {
@@ -3016,7 +2997,6 @@ int lxc_assign_network(const char *lxcpath, char *lxcname,
 {
 	struct lxc_list *iterator;
 	struct lxc_netdev *netdev;
-	char ifname[IFNAMSIZ];
 	int am_root = (getuid() == 0);
 	int err;
 
@@ -3037,13 +3017,7 @@ int lxc_assign_network(const char *lxcpath, char *lxcname,
 		if (!netdev->ifindex)
 			continue;
 
-		/* retrieve the name of the interface */
-		if (!if_indextoname(netdev->ifindex, ifname)) {
-			ERROR("no interface corresponding to index '%d'", netdev->ifindex);
-			return -1;
-		}
-
-		err = lxc_netdev_move_by_name(ifname, pid, NULL);
+		err = lxc_netdev_move_by_index(netdev->ifindex, pid, netdev->name);
 		if (err) {
 			ERROR("failed to move '%s' to the container : %s",
 			      netdev->link, strerror(-err));
