@@ -2200,7 +2200,7 @@ static int setup_netdev(struct lxc_netdev *netdev)
 	int err;
 
 	/* empty network namespace */
-	if (!netdev->ifindex) {
+	if (netdev->type == LXC_NET_EMPTY) {
 		if (netdev->flags & IFF_UP) {
 			err = lxc_netdev_up("lo");
 			if (err) {
@@ -2209,10 +2209,10 @@ static int setup_netdev(struct lxc_netdev *netdev)
 				return -1;
 			}
 		}
-		if (netdev->type != LXC_NET_VETH)
-			return 0;
-		netdev->ifindex = if_nametoindex(netdev->name);
+		return 0;
 	}
+	if (netdev->type == LXC_NET_NONE)
+		return 0;
 
 	/* get the new ifindex in case of physical netdev */
 	if (netdev->type == LXC_NET_PHYS) {
@@ -2221,6 +2221,11 @@ static int setup_netdev(struct lxc_netdev *netdev)
 				netdev->link);
 			return -1;
 		}
+	}
+
+	if (!netdev->ifindex) {
+		ERROR("network interface without index");
+		return -1;
 	}
 
 	/* retrieve the name of the interface */
@@ -3039,8 +3044,21 @@ int lxc_assign_network(const char *lxcpath, char *lxcname,
 		}
 
 		/* empty network namespace, nothing to move */
-		if (!netdev->ifindex)
+		if (netdev->type == LXC_NET_NONE || netdev->type == LXC_NET_EMPTY)
 			continue;
+
+		if (!netdev->ifindex) {
+			/* This would mean they're internally incomplete or invalid entries
+			 * such as non-instantiated devs while running as unprivileged user.
+			 */
+			const char *name = netdev->name ? netdev->name : netdev->link;
+			if (name) {
+				ERROR("cannot assign network interface %s", name);
+			} else {
+				ERROR("cannot assign incomplete network interface");
+			}
+			return -1;
+		}
 
 		/* retrieve the name of the interface */
 		if (!if_indextoname(netdev->ifindex, ifname)) {
