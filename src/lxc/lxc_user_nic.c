@@ -414,23 +414,29 @@ static int get_mtu(char *name)
 	return netdev_get_mtu(idx);
 }
 
-static bool create_nic(char *nic, char *br, int pid, char **cnic)
+static int create_nic(char *nic, char *br, int pid, char **cnic)
 {
 	char *veth1buf, *veth2buf;
 	veth1buf = alloca(IFNAMSIZ);
 	veth2buf = alloca(IFNAMSIZ);
-	int ret, mtu;
+	int ret, mtu, ifindex;
 
 	ret = snprintf(veth1buf, IFNAMSIZ, "%s", nic);
 	if (ret < 0 || ret >= IFNAMSIZ) {
 		fprintf(stderr, "host nic name too long\n");
-		return false;
+		return 0;
 	}
 
 	/* create the nics */
 	if (instantiate_veth(veth1buf, &veth2buf) < 0) {
 		fprintf(stderr, "Error creating veth tunnel\n");
-		return false;
+		return 0;
+	}
+
+	ifindex = if_nametoindex(veth2buf);
+	if (!ifindex) {
+		fprintf(stderr, "Error getting veth peer index\n");
+		return 0;
 	}
 
 	if (strcmp(br, "none") != 0) {
@@ -452,17 +458,17 @@ static bool create_nic(char *nic, char *br, int pid, char **cnic)
 	}
 
 	/* pass veth2 to target netns */
-	ret = lxc_netdev_move_by_name(veth2buf, pid, NULL);
+	ret = lxc_netdev_move_by_index(ifindex, pid, NULL);
 	if (ret < 0) {
 		fprintf(stderr, "Error moving %s to netns %d\n", veth2buf, pid);
 		goto out_del;
 	}
 	*cnic = strdup(veth2buf);
-	return true;
+	return ifindex;
 
 out_del:
 	lxc_netdev_delete_by_name(veth1buf);
-	return false;
+	return 0;
 }
 
 /*
@@ -470,16 +476,13 @@ out_del:
  * *dest will container the name (vethXXXXXX) which is attached
  * on the host to the lxc bridge
  */
-static bool get_new_nicname(char **dest, char *br, int pid, char **cnic)
+static int get_new_nicname(char **dest, char *br, int pid, char **cnic)
 {
 	char template[IFNAMSIZ];
 	snprintf(template, sizeof(template), "vethXXXXXX");
 	*dest = lxc_mkifname(template);
 
-	if (!create_nic(*dest, br, pid, cnic)) {
-		return false;
-	}
-	return true;
+	return create_nic(*dest, br, pid, cnic);
 }
 
 static bool get_nic_from_line(char *p, char **nic)
@@ -577,7 +580,7 @@ static int count_entries(char *buf, off_t len, char *me, char *t, char *br)
  * The dbfile has lines of the format:
  * user type bridge nicname
  */
-static bool get_nic_if_avail(int fd, struct alloted_s *names, int pid, char *intype, char *br, int allowed, char **nicname, char **cnic)
+static int get_nic_if_avail(int fd, struct alloted_s *names, int pid, char *intype, char *br, int allowed, char **nicname, char **cnic)
 {
 	off_t len, slen;
 	struct stat sb;
@@ -585,25 +588,26 @@ static bool get_nic_if_avail(int fd, struct alloted_s *names, int pid, char *int
 	int ret, count = 0;
 	char *owner;
 	struct alloted_s *n;
+	int ifindex;
 
 	for (n=names; n!=NULL; n=n->next)
 		cull_entries(fd, n->name, intype, br);
 
 	if (allowed == 0)
-		return false;
+		return 0;
 
 	owner = names->name;
 
 	if (fstat(fd, &sb) < 0) {
 		fprintf(stderr, "Failed to fstat: %s\n", strerror(errno));
-		return false;
+		return 0;
 	}
 	len = sb.st_size;
 	if (len != 0) {
 		buf = mmap(NULL, len, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
 		if (buf == MAP_FAILED) {
 			fprintf(stderr, "Failed to create mapping\n");
-			return false;
+			return 0;
 		}
 
 		owner = NULL;
@@ -619,10 +623,10 @@ static bool get_nic_if_avail(int fd, struct alloted_s *names, int pid, char *int
 	}
 
 	if (owner == NULL)
-		return false;
+		return 0;
 
-	if (!get_new_nicname(nicname, br, pid, cnic))
-		return false;
+	if (!(ifindex = get_new_nicname(nicname, br, pid, cnic)))
+		return 0;
 	/* owner  ' ' intype ' ' br ' ' *nicname + '\n' + '\0' */
 	slen = strlen(owner) + strlen(intype) + strlen(br) + strlen(*nicname) + 5;
 	newline = alloca(slen);
@@ -630,7 +634,7 @@ static bool get_nic_if_avail(int fd, struct alloted_s *names, int pid, char *int
 	if (ret < 0 || ret >= slen) {
 		if (lxc_netdev_delete_by_name(*nicname) != 0)
 			fprintf(stderr, "Error unlinking %s!\n", *nicname);
-		return false;
+		return 0;
 	}
 	if (len)
 		munmap(buf, len);
@@ -641,11 +645,11 @@ static bool get_nic_if_avail(int fd, struct alloted_s *names, int pid, char *int
 		fprintf(stderr, "Failed to create mapping after extending: %s\n", strerror(errno));
 		if (lxc_netdev_delete_by_name(*nicname) != 0)
 			fprintf(stderr, "Error unlinking %s!\n", *nicname);
-		return false;
+		return 0;
 	}
 	strcpy(buf+len, newline);
 	munmap(buf, len+slen);
-	return true;
+	return ifindex;
 }
 
 static bool create_db_dir(char *fnam)
@@ -671,10 +675,10 @@ again:
 
 #define VETH_DEF_NAME "eth%d"
 
-static int rename_in_ns(int pid, char *oldname, char **newnamep)
+static int rename_in_ns(int pid, char *oldname, char **newnamep, int ifindex)
 {
 	char nspath[MAXPATHLEN];
-	int fd = -1, ofd = -1, ret, ifindex = -1;
+	int fd = -1, ofd = -1, ret;
 	bool grab_newname = false;
 
 	ret = snprintf(nspath, MAXPATHLEN, "/proc/%d/ns/net", getpid());
@@ -700,10 +704,6 @@ static int rename_in_ns(int pid, char *oldname, char **newnamep)
 	if (!*newnamep) {
 		grab_newname = true;
 		*newnamep = VETH_DEF_NAME;
-		if (!(ifindex = if_nametoindex(oldname))) {
-			fprintf(stderr, "failed to get netdev index\n");
-			goto out_err;
-		}
 	}
 	if ((ret = lxc_netdev_rename_by_name(oldname, *newnamep)) < 0) {
 		fprintf(stderr, "Error %d renaming netdev %s to %s in container\n", ret, oldname, *newnamep);
@@ -782,7 +782,7 @@ static bool may_access_netns(int pid)
 int main(int argc, char *argv[])
 {
 	int n, fd;
-	bool gotone = false;
+	int ifindex = 0;
 	char *me;
 	char *nicname = alloca(40);
 	char *cnic = NULL; // created nic name in container is returned here.
@@ -837,22 +837,22 @@ int main(int argc, char *argv[])
 
 	n = get_alloted(me, argv[4], argv[5], &alloted);
 	if (n > 0)
-		gotone = get_nic_if_avail(fd, alloted, pid, argv[4], argv[5], n, &nicname, &cnic);
+		ifindex = get_nic_if_avail(fd, alloted, pid, argv[4], argv[5], n, &nicname, &cnic);
 
 	close(fd);
 	free_alloted(&alloted);
-	if (!gotone) {
+	if (!ifindex) {
 		fprintf(stderr, "Quota reached\n");
 		exit(1);
 	}
 
 	// Now rename the link
-	if (rename_in_ns(pid, cnic, &vethname) < 0) {
+	if (rename_in_ns(pid, cnic, &vethname, ifindex) < 0) {
 		fprintf(stderr, "Failed to rename the link\n");
 		exit(1);
 	}
 
 	// write the name of the interface pair to the stdout - like eth0:veth9MT2L4
-	fprintf(stdout, "%s:%s\n", vethname, nicname);
+	fprintf(stdout, "%s:%s:%d\n", vethname, nicname, ifindex);
 	exit(0);
 }

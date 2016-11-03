@@ -3008,6 +3008,12 @@ static int unpriv_assign_nic(const char *lxcpath, char *lxcname,
 		return -1;
 	}
 
+	/* fill netdev->ifindex field */
+	token = strtok_r(NULL, ":", &saveptr);
+	if (!token)
+		return -1;
+	netdev->ifindex = atoi(token);
+
 	return 0;
 }
 
@@ -3028,8 +3034,7 @@ int lxc_assign_network(const char *lxcpath, char *lxcname,
 			if (unpriv_assign_nic(lxcpath, lxcname, netdev, pid))
 				return -1;
 			// lxc-user-nic has moved the nic to the new ns.
-			// unpriv_assign_nic() fills in netdev->name.
-			// netdev->ifindex will be filed in at setup_netdev.
+			// unpriv_assign_nic() fills in netdev->name and netdev->ifindex
 			continue;
 		}
 
