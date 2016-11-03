@@ -2200,7 +2200,7 @@ static int setup_netdev(struct lxc_netdev *netdev)
 	int err;
 
 	/* empty network namespace */
-	if (!netdev->ifindex) {
+	if (netdev->type == LXC_NET_EMPTY) {
 		if (netdev->flags & IFF_UP) {
 			err = lxc_netdev_up("lo");
 			if (err) {
@@ -2209,6 +2209,13 @@ static int setup_netdev(struct lxc_netdev *netdev)
 				return -1;
 			}
 		}
+		return 0;
+	}
+
+	/* veths created for unprivileged users via unpriv_assign_nic don't have an
+	 * ifindex assigned at this point, but they do have a known name.
+	 */
+	if (!netdev->ifindex) {
 		if (netdev->type != LXC_NET_VETH)
 			return 0;
 		netdev->ifindex = if_nametoindex(netdev->name);
