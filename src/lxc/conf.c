@@ -3041,8 +3041,21 @@ int lxc_assign_network(const char *lxcpath, char *lxcname,
 		}
 
 		/* empty network namespace, nothing to move */
-		if (!netdev->ifindex)
+		if (netdev->type == LXC_NET_NONE || netdev->type == LXC_NET_EMPTY)
 			continue;
+
+		if (!netdev->ifindex) {
+			/* This would mean they're internally incomplete or invalid entries
+			 * such as non-instantiated devs while running as unprivileged user.
+			 */
+			const char *name = netdev->name ? netdev->name : netdev->link;
+			if (name) {
+				ERROR("cannot assign network interface %s", name);
+			} else {
+				ERROR("cannot assign incomplete network interface");
+			}
+			return -1;
+		}
 
 		/* retrieve the name of the interface */
 		if (!if_indextoname(netdev->ifindex, ifname)) {
