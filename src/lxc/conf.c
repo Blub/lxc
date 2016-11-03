@@ -2216,8 +2216,12 @@ static int setup_netdev(struct lxc_netdev *netdev)
 	 * ifindex assigned at this point, but they do have a known name.
 	 */
 	if (!netdev->ifindex) {
-		if (netdev->type != LXC_NET_VETH)
+		if (netdev->type == LXC_NET_NONE)
 			return 0;
+		if (!netdev->name) {
+			ERROR("network interface with neither name nor index known");
+			return -1;
+		}
 		netdev->ifindex = if_nametoindex(netdev->name);
 	}
 
