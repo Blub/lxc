@@ -1196,7 +1196,7 @@ static int lxc_spawn(struct lxc_handler *handler)
 
 	cgroups_connected = true;
 
-	if (!cgroup_create(handler)) {
+	if (!cgroup_create(handler, false)) {
 		ERROR("Failed creating cgroups.");
 		goto out_delete_net;
 	}
@@ -1275,10 +1275,10 @@ static int lxc_spawn(struct lxc_handler *handler)
 		goto out_delete_net;
 	}
 
-	if (!cgroup_enter(handler))
+	if (!cgroup_enter(handler, false))
 		goto out_delete_net;
 
-	if (!cgroup_chown(handler))
+	if (!cgroup_chown(handler, false))
 		goto out_delete_net;
 
 	if (failed_before_rename)
@@ -1332,6 +1332,21 @@ static int lxc_spawn(struct lxc_handler *handler)
 		goto out_delete_net;
 	}
 	TRACE("Set up cgroup device limits");
+
+	if (cgns_supported()) {
+		if (!cgroup_create(handler, true)) {
+			ERROR("failed to create inner cgroup separation layer");
+			goto out_delete_net;
+		}
+		if (!cgroup_enter(handler, true)) {
+			ERROR("failed to enter inner cgroup separation layer");
+			goto out_delete_net;
+		}
+		if (!cgroup_chown(handler, true)) {
+			ERROR("failed chown inner cgroup separation layer");
+			goto out_delete_net;
+		}
+	}
 
 	cgroup_disconnect();
 	cgroups_connected = false;

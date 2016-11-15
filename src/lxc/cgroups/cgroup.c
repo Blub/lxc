@@ -80,19 +80,19 @@ void cgroup_destroy(struct lxc_handler *handler)
 }
 
 /* Create the container cgroups for all requested controllers. */
-bool cgroup_create(struct lxc_handler *handler)
+bool cgroup_create(struct lxc_handler *handler, bool inner)
 {
 	if (ops)
-		return ops->create(handler->cgroup_data);
+		return ops->create(handler->cgroup_data, inner);
 
 	return false;
 }
 
 /* Enter the container init into its new cgroups for all requested controllers. */
-bool cgroup_enter(struct lxc_handler *handler)
+bool cgroup_enter(struct lxc_handler *handler, bool inner)
 {
 	if (ops)
-		return ops->enter(handler->cgroup_data, handler->pid);
+		return ops->enter(handler->cgroup_data, handler->pid, inner);
 
 	return false;
 }
@@ -106,10 +106,11 @@ bool cgroup_create_legacy(struct lxc_handler *handler)
 }
 
 const char *cgroup_get_cgroup(struct lxc_handler *handler,
-			      const char *subsystem)
+			      const char *subsystem,
+			      bool inner)
 {
 	if (ops)
-		return ops->get_cgroup(handler->cgroup_data, subsystem);
+		return ops->get_cgroup(handler->cgroup_data, subsystem, inner);
 
 	return NULL;
 }
@@ -155,10 +156,10 @@ bool cgroup_setup_limits(struct lxc_handler *handler, bool with_devices)
 	return false;
 }
 
-bool cgroup_chown(struct lxc_handler *handler)
+bool cgroup_chown(struct lxc_handler *handler, bool inner)
 {
 	if (ops && ops->chown)
-		return ops->chown(handler->cgroup_data, handler->conf);
+		return ops->chown(handler->cgroup_data, handler->conf, inner);
 
 	return true;
 }
