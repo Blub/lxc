@@ -1334,17 +1334,20 @@ static int lxc_spawn(struct lxc_handler *handler)
 	TRACE("Set up cgroup device limits");
 
 	if (cgns_supported()) {
-		if (!cgroup_create(handler, true)) {
-			ERROR("failed to create inner cgroup separation layer");
-			goto out_delete_net;
-		}
-		if (!cgroup_enter(handler, true)) {
-			ERROR("failed to enter inner cgroup separation layer");
-			goto out_delete_net;
-		}
-		if (!cgroup_chown(handler, true)) {
-			ERROR("failed chown inner cgroup separation layer");
-			goto out_delete_net;
+		const char *tmp = lxc_global_config_value("lxc.cgroup.protect_limits");
+		if (!strcmp(tmp, "both") || !strcmp(tmp, wants_to_map_ids ? "unprivileged" : "privileged")) {
+			if (!cgroup_create(handler, true)) {
+				ERROR("failed to create inner cgroup separation layer");
+				goto out_delete_net;
+			}
+			if (!cgroup_enter(handler, true)) {
+				ERROR("failed to enter inner cgroup separation layer");
+				goto out_delete_net;
+			}
+			if (!cgroup_chown(handler, true)) {
+				ERROR("failed chown inner cgroup separation layer");
+				goto out_delete_net;
+			}
 		}
 	}
 
