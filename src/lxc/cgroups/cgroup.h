@@ -36,7 +36,7 @@
  * will be moved into an additional subdirectory "cgns/" inside the cgroup in
  * order to prevent it from accessing the outer limiting cgroup.
  */
-#define CGROUP_NAMESPACE_SUBDIR "cgns"
+#define CGROUP_NAMESPACE_SUBDIR "ns"
 
 struct lxc_handler;
 struct lxc_conf;
