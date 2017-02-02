@@ -6,11 +6,11 @@ Wants=lxc.service
 Documentation=man:lxc-start man:lxc
 
 [Service]
-Type=simple
+Type=forking
 KillMode=mixed
 KillSignal=SIGPWR
 TimeoutStopSec=120s
-ExecStart=@BINDIR@/lxc-start -F -n %i
+ExecStart=@BINDIR@/lxc-start -n %i
 # Environment=BOOTUP=serial
 # Environment=CONSOLETYPE=serial
 Delegate=yes
