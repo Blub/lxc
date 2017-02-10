@@ -13,7 +13,6 @@ ExecStart=@BINDIR@/lxc-start -F -n %i
 ExecStop=@BINDIR@/lxc-stop -n %i
 # Environment=BOOTUP=serial
 # Environment=CONSOLETYPE=serial
-Delegate=yes
 StandardOutput=syslog
 StandardError=syslog
 
