@@ -13,7 +13,6 @@ TimeoutStopSec=120s
 ExecStart=@BINDIR@/lxc-start -F -n %i
 # Environment=BOOTUP=serial
 # Environment=CONSOLETYPE=serial
-Delegate=yes
 StandardOutput=syslog
 StandardError=syslog
 
