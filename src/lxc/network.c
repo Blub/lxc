@@ -503,6 +503,11 @@ static int instantiate_veth(struct lxc_handler *handler, struct lxc_netdev *netd
 				netdev->upscript, "up", argv);
 		if (err < 0)
 			goto out_delete;
+	} else if (netdev->link[0] == '\0') {
+		err = run_script(handler->name, "net", "/usr/share/lxc/lxcnetaddbr", "up",
+				 "veth", veth1, (char*) NULL);
+		if (err)
+			goto out_delete;
 	}
 
 	DEBUG("Instantiated veth \"%s/%s\", index is \"%d\"", veth1, veth2,
