@@ -1324,9 +1324,6 @@ static int lxc_spawn(struct lxc_handler *handler)
 		goto out_delete_net;
 	}
 
-	if (lxc_sync_barrier_child(handler, LXC_SYNC_CGROUP_UNSHARE))
-		goto out_delete_net;
-
 	if (!cgroup_setup_limits(handler, true)) {
 		ERROR("Failed to setup the devices cgroup for container \"%s\".", name);
 		goto out_delete_net;
@@ -1350,6 +1347,9 @@ static int lxc_spawn(struct lxc_handler *handler)
 			}
 		}
 	}
+
+	if (lxc_sync_barrier_child(handler, LXC_SYNC_CGROUP_UNSHARE))
+		goto out_delete_net;
 
 	cgroup_disconnect();
 	cgroups_connected = false;
