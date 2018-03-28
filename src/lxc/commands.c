@@ -425,20 +425,8 @@ static int lxc_cmd_get_clone_flags_callback(int fd, struct lxc_cmd_req *req,
 	return lxc_cmd_rsp_send(fd, &rsp);
 }
 
-/*
- * lxc_cmd_get_cgroup_path: Calculate a container's cgroup path for a
- * particular subsystem. This is the cgroup path relative to the root
- * of the cgroup filesystem.
- *
- * @name      : name of container to connect to
- * @lxcpath   : the lxcpath in which the container is running
- * @subsystem : the subsystem being asked about
- *
- * Returns the path on success, NULL on failure. The caller must free() the
- * returned path.
- */
-char *lxc_cmd_get_cgroup_path(const char *name, const char *lxcpath,
-			      const char *subsystem)
+char *do_lxc_cmd_get_cgroup_path(const char *name, const char *lxcpath,
+			      const char *subsystem, bool inner)
 {
 	int ret, stopped;
 	struct lxc_cmd_rr cmd = {
@@ -451,8 +439,18 @@ char *lxc_cmd_get_cgroup_path(const char *name, const char *lxcpath,
 
 	cmd.req.data = subsystem;
 	cmd.req.datalen = 0;
-	if (subsystem)
-		cmd.req.datalen = strlen(subsystem) + 1;
+	if (subsystem) {
+		size_t subsyslen = strlen(subsystem);
+		if (inner) {
+			char *data = alloca(subsyslen+2);
+			memcpy(data, subsystem, subsyslen+1);
+			data[subsyslen+1] = 1;
+			cmd.req.datalen = subsyslen+2,
+			cmd.req.data = data;
+		} else {
+			cmd.req.datalen = subsyslen+1;
+		}
+	}
 
 	ret = lxc_cmd(name, &cmd, &stopped, lxcpath, NULL);
 	if (ret < 0)
@@ -467,6 +465,42 @@ char *lxc_cmd_get_cgroup_path(const char *name, const char *lxcpath,
 	return cmd.rsp.data;
 }
 
+/*
+ * lxc_cmd_get_cgroup_path: Calculate a container's cgroup path for a
+ * particular subsystem. This is the cgroup path relative to the root
+ * of the cgroup filesystem.
+ *
+ * @name      : name of container to connect to
+ * @lxcpath   : the lxcpath in which the container is running
+ * @subsystem : the subsystem being asked about
+ *
+ * Returns the path on success, NULL on failure. The caller must free() the
+ * returned path.
+ */
+char *lxc_cmd_get_cgroup_path(const char *name, const char *lxcpath,
+	const char *subsystem)
+{
+	return do_lxc_cmd_get_cgroup_path(name, lxcpath, subsystem, false);
+}
+
+/*
+ * lxc_cmd_get_attach_cgroup_path: Calculate a container's inner cgroup path
+ * for a particular subsystem. This is the cgroup path relative to the root
+ * of the cgroup filesystem.
+ *
+ * @name      : name of container to connect to
+ * @lxcpath   : the lxcpath in which the container is running
+ * @subsystem : the subsystem being asked about
+ *
+ * Returns the path on success, NULL on failure. The caller must free() the
+ * returned path.
+ */
+char *lxc_cmd_get_attach_cgroup_path(const char *name, const char *lxcpath,
+	const char *subsystem)
+{
+	return do_lxc_cmd_get_cgroup_path(name, lxcpath, subsystem, true);
+}
+
 static int lxc_cmd_get_cgroup_callback(int fd, struct lxc_cmd_req *req,
 				       struct lxc_handler *handler,
 				       struct lxc_epoll_descr *descr)
@@ -475,10 +509,21 @@ static int lxc_cmd_get_cgroup_callback(int fd, struct lxc_cmd_req *req,
 	struct lxc_cmd_rsp rsp;
 	struct cgroup_ops *cgroup_ops = handler->cgroup_ops;
 
-	if (req->datalen > 0)
-		path = cgroup_ops->get_cgroup(cgroup_ops, req->data);
-	else
-		path = cgroup_ops->get_cgroup(cgroup_ops, NULL);
+	if (req->datalen > 0) {
+		const char *subsystem;
+		size_t subsyslen;
+		bool inner = false;
+		subsystem = req->data;
+		subsyslen = strlen(subsystem);
+		if (req->datalen == subsyslen+2)
+			inner = (subsystem[subsyslen+1] == 1);
+
+		path = cgroup_ops->get_cgroup(cgroup_ops, req->data, inner);
+	} else {
+		// FIXME: cgroup separation for cgroup v2 cannot be handled
+		// like we used to do v1 here... need to figure this out...
+		path = cgroup_ops->get_cgroup(cgroup_ops, NULL, false);
+	}
 	if (!path)
 		return -1;
 
@@ -653,7 +698,7 @@ static int lxc_cmd_stop_callback(int fd, struct lxc_cmd_req *req,
 		 * lxc_unfreeze() would do another cmd (GET_CGROUP) which would
 		 * deadlock us.
 		 */
-		if (!cgroup_ops->get_cgroup(cgroup_ops, "freezer"))
+		if (!cgroup_ops->get_cgroup(cgroup_ops, "freezer", false))
 			return 0;
 
 		if (cgroup_ops->unfreeze(cgroup_ops))

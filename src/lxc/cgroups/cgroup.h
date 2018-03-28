@@ -32,6 +32,12 @@
 #define MONITOR_CGROUP "lxc.monitor"
 #define PIVOT_CGROUP "lxc.pivot"
 
+/* When lxc.cgroup.protect_limits is in effect the container's cgroup namespace
+ * will be moved into an additional subdirectory "cgns/" inside the cgroup in
+ * order to prevent it from accessing the outer limiting cgroup.
+ */
+#define CGROUP_NAMESPACE_SUBDIR "cgns"
+
 struct lxc_handler;
 struct lxc_conf;
 struct lxc_list;
@@ -72,6 +78,9 @@ typedef enum {
  * @monitor_full_path
  * - The full path to the monitor's cgroup.
  *
+ * @container_inner_path
+ * - The full path to the container's inner cgroup when protect_limits is used.
+ *
  * @version
  * - legacy hierarchy
  *   If the hierarchy is a legacy hierarchy this will be set to
@@ -90,6 +99,7 @@ struct hierarchy {
 	char *mountpoint;
 	char *container_base_path;
 	char *container_full_path;
+	char *container_inner_path;
 	char *monitor_full_path;
 	int version;
 };
@@ -144,9 +154,9 @@ struct cgroup_ops {
 	void (*monitor_destroy)(struct cgroup_ops *ops, struct lxc_handler *handler);
 	bool (*monitor_create)(struct cgroup_ops *ops, struct lxc_handler *handler);
 	bool (*monitor_enter)(struct cgroup_ops *ops, pid_t pid);
-	bool (*payload_create)(struct cgroup_ops *ops, struct lxc_handler *handler);
-	bool (*payload_enter)(struct cgroup_ops *ops, pid_t pid);
-	const char *(*get_cgroup)(struct cgroup_ops *ops, const char *controller);
+	bool (*payload_create)(struct cgroup_ops *ops, struct lxc_handler *handler, bool inner);
+	bool (*payload_enter)(struct cgroup_ops *ops, pid_t pid, bool inner);
+	const char *(*get_cgroup)(struct cgroup_ops *ops, const char *controller, bool inner);
 	bool (*escape)(const struct cgroup_ops *ops, struct lxc_conf *conf);
 	int (*num_hierarchies)(struct cgroup_ops *ops);
 	bool (*get_hierarchies)(struct cgroup_ops *ops, int n, char ***out);
@@ -157,7 +167,7 @@ struct cgroup_ops {
 	bool (*unfreeze)(struct cgroup_ops *ops);
 	bool (*setup_limits)(struct cgroup_ops *ops, struct lxc_conf *conf,
 			     bool with_devices);
-	bool (*chown)(struct cgroup_ops *ops, struct lxc_conf *conf);
+	bool (*chown)(struct cgroup_ops *ops, struct lxc_conf *conf, bool inner);
 	bool (*attach)(struct cgroup_ops *ops, const char *name,
 		       const char *lxcpath, pid_t pid);
 	bool (*mount)(struct cgroup_ops *ops, struct lxc_handler *handler,

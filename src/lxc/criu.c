@@ -332,7 +332,7 @@ static void exec_criu(struct cgroup_ops *cgroup_ops, struct lxc_conf *conf,
 		} else {
 			const char *p;
 
-			p = cgroup_ops->get_cgroup(cgroup_ops, controllers[0]);
+			p = cgroup_ops->get_cgroup(cgroup_ops, controllers[0], false);
 			if (!p) {
 				ERROR("failed to get cgroup path for %s", controllers[0]);
 				goto err;
@@ -975,7 +975,7 @@ static void do_restore(struct lxc_container *c, int status_pipe, struct migrate_
 		goto out_fini_handler;
 	handler->cgroup_ops = cgroup_ops;
 
-	if (!cgroup_ops->payload_create(cgroup_ops, handler)) {
+	if (!cgroup_ops->payload_create(cgroup_ops, handler, false)) {
 		ERROR("failed creating groups");
 		goto out_fini_handler;
 	}
