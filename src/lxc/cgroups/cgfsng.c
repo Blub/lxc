@@ -101,6 +101,7 @@ struct hierarchy {
 	char *mountpoint;
 	char *base_cgroup;
 	char *fullcgpath;
+	char *innercgpath;
 	int version;
 };
 
@@ -955,6 +956,7 @@ static struct hierarchy *add_hierarchy(char **clist, char *mountpoint,
 	new->mountpoint = mountpoint;
 	new->base_cgroup = base_cgroup;
 	new->fullcgpath = NULL;
+	new->innercgpath = NULL;
 	new->version = type;
 
 	newentry = append_null_to_list((void ***)&hierarchies);
@@ -1587,6 +1589,8 @@ static int cgroup_rmdir(char *container_cgroup)
 
 		free(h->fullcgpath);
 		h->fullcgpath = NULL;
+		free(h->innercgpath);
+		h->innercgpath = NULL;
 	}
 
 	return 0;
@@ -1597,6 +1601,7 @@ struct generic_userns_exec_data {
 	struct lxc_conf *conf;
 	uid_t origuid; /* target uid in parent namespace */
 	char *path;
+	bool inner;
 };
 
 static int cgroup_rmdir_wrapper(void *data)
@@ -1641,6 +1646,7 @@ static void cgfsng_destroy(void *hdata, struct lxc_conf *conf)
 	wrap.origuid = 0;
 	wrap.d = hdata;
 	wrap.conf = conf;
+	wrap.inner = false;
 
 	if (conf && !lxc_list_empty(&conf->id_map))
 		ret = userns_exec_1(conf, cgroup_rmdir_wrapper, &wrap,
@@ -1730,22 +1736,29 @@ on_error:
 	return bret;
 }
 
-static bool create_path_for_hierarchy(struct hierarchy *h, char *cgname)
+static bool create_path_for_hierarchy(struct hierarchy *h, char *cgname, bool inner)
 {
 	int ret;
 
-	h->fullcgpath = must_make_path(h->mountpoint, h->base_cgroup, cgname, NULL);
-	if (dir_exists(h->fullcgpath)) {
-		ERROR("The cgroup \"%s\" already existed", h->fullcgpath);
+	char *path;
+	if (inner) {
+		path = must_make_path(h->fullcgpath, CGROUP_NAMESPACE_SUBDIR, NULL);
+		h->innercgpath = path;
+	} else {
+		path = must_make_path(h->mountpoint, h->base_cgroup, cgname, NULL);
+		h->fullcgpath = path;
+	}
+	if (dir_exists(path)) { // it must not already exist
+		ERROR("Path \"%s\" already existed.", path);
 		return false;
 	}
 
-	if (!cg_legacy_handle_cpuset_hierarchy(h, cgname)) {
+	if (!inner && !cg_legacy_handle_cpuset_hierarchy(h, cgname)) {
 		ERROR("Failed to handle legacy cpuset controller");
 		return false;
 	}
 
-	ret = mkdir_p(h->fullcgpath, 0755);
+	ret = mkdir_p(path, 0755);
 	if (ret < 0) {
 		ERROR("Failed to create cgroup \"%s\"", h->fullcgpath);
 		return false;
@@ -1766,10 +1779,26 @@ static void remove_path_for_hierarchy(struct hierarchy *h, char *cgname)
 	h->fullcgpath = NULL;
 }
 
+static inline bool cgfsng_create_inner(struct cgfsng_handler_data *d)
+{
+	size_t i;
+	bool ret = true;
+	char *cgname = must_make_path(d->container_cgroup, CGROUP_NAMESPACE_SUBDIR, NULL);
+	for (i = 0; hierarchies[i]; i++) {
+		if (!create_path_for_hierarchy(hierarchies[i], cgname, true)) {
+			SYSERROR("Failed to create %s namespace subdirectory: %s", hierarchies[i]->fullcgpath, strerror(errno));
+			ret = false;
+			break;
+		}
+	}
+	free(cgname);
+	return ret;
+}
+
 /* Try to create the same cgroup in all hierarchies. Start with cgroup_pattern;
  * next cgroup_pattern-1, -2, ..., -999.
  */
-static inline bool cgfsng_create(void *hdata)
+static inline bool cgfsng_create(void *hdata, bool inner)
 {
 	int i;
 	size_t len;
@@ -1781,7 +1810,14 @@ static inline bool cgfsng_create(void *hdata)
 		return false;
 
 	if (d->container_cgroup) {
+		if (inner)
+			return cgfsng_create_inner(d);
 		WARN("cgfsng_create called a second time");
+		return false;
+	}
+
+	if (inner) {
+		ERROR("cgfsng_create called twice for innner cgroup");
 		return false;
 	}
 
@@ -1821,7 +1857,7 @@ again:
 	}
 
 	for (i = 0; hierarchies[i]; i++) {
-		if (!create_path_for_hierarchy(hierarchies[i], container_cgroup)) {
+		if (!create_path_for_hierarchy(hierarchies[i], container_cgroup, false)) {
 			int j;
 			ERROR("Failed to create cgroup \"%s\"", hierarchies[i]->fullcgpath);
 			free(hierarchies[i]->fullcgpath);
@@ -1843,7 +1879,7 @@ out_free:
 	return false;
 }
 
-static bool cgfsng_enter(void *hdata, pid_t pid)
+static bool cgfsng_enter(void *hdata, pid_t pid, bool inner)
 {
 	int i, len;
 	char pidstr[25];
@@ -1856,8 +1892,13 @@ static bool cgfsng_enter(void *hdata, pid_t pid)
 		int ret;
 		char *fullpath;
 
-		fullpath = must_make_path(hierarchies[i]->fullcgpath,
-					  "cgroup.procs", NULL);
+		if (inner)
+			fullpath = must_make_path(hierarchies[i]->fullcgpath,
+						  CGROUP_NAMESPACE_SUBDIR,
+						  "cgroup.procs", NULL);
+		else
+			fullpath = must_make_path(hierarchies[i]->fullcgpath,
+						  "cgroup.procs", NULL);
 		ret = lxc_write_to_file(fullpath, pidstr, len, false);
 		if (ret != 0) {
 			SYSERROR("Failed to enter cgroup \"%s\"", fullpath);
@@ -1933,9 +1974,15 @@ static int chown_cgroup_wrapper(void *data)
 		char *fullpath;
 		char *path = hierarchies[i]->fullcgpath;
 
+		if (arg->inner)
+			path = must_make_path(path, CGROUP_NAMESPACE_SUBDIR, NULL);
+
 		ret = chowmod(path, destuid, nsgid, 0775);
-		if (ret < 0)
+		if (ret < 0) {
+			if (arg->inner)
+				free(path);
 			return -1;
+		}
 
 		/* Failures to chown() these are inconvenient but not
 		 * detrimental We leave these owned by the container launcher,
@@ -1954,8 +2001,11 @@ static int chown_cgroup_wrapper(void *data)
 		(void)chowmod(fullpath, destuid, 0, 0664);
 		free(fullpath);
 
-		if (hierarchies[i]->version != CGROUP2_SUPER_MAGIC)
+		if (hierarchies[i]->version != CGROUP2_SUPER_MAGIC) {
+			if (arg->inner)
+				free(path);
 			continue;
+		}
 
 		fullpath = must_make_path(path, "cgroup.subtree_control", NULL);
 		(void)chowmod(fullpath, destuid, nsgid, 0664);
@@ -1964,12 +2014,14 @@ static int chown_cgroup_wrapper(void *data)
 		fullpath = must_make_path(path, "cgroup.threads", NULL);
 		(void)chowmod(fullpath, destuid, nsgid, 0664);
 		free(fullpath);
+		if (arg->inner)
+			free(path);
 	}
 
 	return 0;
 }
 
-static bool cgfsng_chown(void *hdata, struct lxc_conf *conf)
+static bool cgfsng_chown(void *hdata, struct lxc_conf *conf, bool inner)
 {
 	struct cgfsng_handler_data *d = hdata;
 	struct generic_userns_exec_data wrap;
@@ -1984,6 +2036,7 @@ static bool cgfsng_chown(void *hdata, struct lxc_conf *conf)
 	wrap.path = NULL;
 	wrap.d = d;
 	wrap.conf = conf;
+	wrap.inner = inner;
 
 	if (userns_exec_1(conf, chown_cgroup_wrapper, &wrap,
 			  "chown_cgroup_wrapper") < 0) {
@@ -2366,7 +2419,7 @@ static bool cgfsng_unfreeze(void *hdata)
 	return true;
 }
 
-static const char *cgfsng_get_cgroup(void *hdata, const char *controller)
+static const char *cgfsng_get_cgroup(void *hdata, const char *controller, bool inner)
 {
 	struct hierarchy *h;
 
@@ -2376,6 +2429,9 @@ static const char *cgfsng_get_cgroup(void *hdata, const char *controller)
 			 controller ? controller : "(null)");
 		return NULL;
 	}
+
+	if (inner && h->innercgpath)
+		return h->innercgpath + strlen(h->mountpoint);
 
 	return h->fullcgpath ? h->fullcgpath + strlen(h->mountpoint) : NULL;
 }
@@ -2408,7 +2464,7 @@ static int __cg_unified_attach(const struct hierarchy *h, const char *name,
 	int fret = -1, idx = 0;
 	char *base_path = NULL, *container_cgroup = NULL, *full_path = NULL;
 
-	container_cgroup = lxc_cmd_get_cgroup_path(name, lxcpath, controller);
+	container_cgroup = lxc_cmd_get_attach_cgroup_path(name, lxcpath, controller);
 	/* not running */
 	if (!container_cgroup)
 		return 0;

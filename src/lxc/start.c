@@ -1556,7 +1556,7 @@ static int lxc_spawn(struct lxc_handler *handler)
 
 	cgroups_connected = true;
 
-	if (!cgroup_create(handler)) {
+	if (!cgroup_create(handler, false)) {
 		ERROR("Failed creating cgroups");
 		goto out_delete_net;
 	}
@@ -1650,10 +1650,10 @@ static int lxc_spawn(struct lxc_handler *handler)
 		goto out_delete_net;
 	}
 
-	if (!cgroup_enter(handler))
+	if (!cgroup_enter(handler, false))
 		goto out_delete_net;
 
-	if (!cgroup_chown(handler))
+	if (!cgroup_chown(handler, false))
 		goto out_delete_net;
 
 	/* Now we're ready to preserve the network namespace */
@@ -1714,15 +1714,29 @@ static int lxc_spawn(struct lxc_handler *handler)
 		}
 	}
 
-	ret = lxc_sync_barrier_child(handler, LXC_SYNC_CGROUP_UNSHARE);
-	if (ret < 0)
-		goto out_delete_net;
-
 	if (!cgroup_setup_limits(handler, true)) {
 		ERROR("Failed to setup legacy device cgroup controller limits");
 		goto out_delete_net;
 	}
 	TRACE("Set up legacy device cgroup controller limits");
+
+	if (cgns_supported()) {
+		if (!cgroup_create(handler, true)) {
+			ERROR("failed to create inner cgroup separation layer");
+			goto out_delete_net;
+		}
+		if (!cgroup_enter(handler, true)) {
+			ERROR("failed to enter inner cgroup separation layer");
+			goto out_delete_net;
+		}
+		if (!cgroup_chown(handler, true)) {
+			ERROR("failed chown inner cgroup separation layer");
+			goto out_delete_net;
+		}
+	}
+
+	if (lxc_sync_barrier_child(handler, LXC_SYNC_CGROUP_UNSHARE))
+		goto out_delete_net;
 
 	cgroup_disconnect();
 	cgroups_connected = false;
