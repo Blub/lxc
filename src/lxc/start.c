@@ -1874,17 +1874,20 @@ static int lxc_spawn(struct lxc_handler *handler)
 	TRACE("Set up legacy device cgroup controller limits");
 
 	if (cgns_supported()) {
-		if (!cgroup_ops->payload_create(cgroup_ops, handler, true)) {
-			ERROR("failed to create inner cgroup separation layer");
-			goto out_delete_net;
-		}
-		if (!cgroup_ops->payload_enter(cgroup_ops, handler->pid, true)) {
-			ERROR("failed to enter inner cgroup separation layer");
-			goto out_delete_net;
-		}
-		if (!cgroup_ops->chown(cgroup_ops, handler->conf, true)) {
-			ERROR("failed chown inner cgroup separation layer");
-			goto out_delete_net;
+		const char *tmp = lxc_global_config_value("lxc.cgroup.protect_limits");
+		if (!strcmp(tmp, "both") || !strcmp(tmp, wants_to_map_ids ? "unprivileged" : "privileged")) {
+			if (!cgroup_ops->payload_create(cgroup_ops, handler, true)) {
+				ERROR("failed to create inner cgroup separation layer");
+				goto out_delete_net;
+			}
+			if (!cgroup_ops->payload_enter(cgroup_ops, handler->pid, true)) {
+				ERROR("failed to enter inner cgroup separation layer");
+				goto out_delete_net;
+			}
+			if (!cgroup_ops->chown(cgroup_ops, handler->conf, true)) {
+				ERROR("failed chown inner cgroup separation layer");
+				goto out_delete_net;
+			}
 		}
 	}
 
