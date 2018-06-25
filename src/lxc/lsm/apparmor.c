@@ -32,19 +32,355 @@
 #include "lsm.h"
 #include "conf.h"
 #include "utils.h"
+#include "caps.h"
+#include "parse.h"
 
 lxc_log_define(apparmor, lsm);
 
 /* set by lsm_apparmor_drv_init if true */
 static int aa_enabled = 0;
+static bool aa_supports_unix;
+static bool aa_can_stack;
+static bool aa_is_stacked;
+static bool aa_admin;
 
 static int mount_features_enabled = 0;
+
+static char sanitized_lxcpath[sizeof(LXCPATH)];
+static char aa_cache_path[PATH_MAX];
+static char aa_profile_path[PATH_MAX];
 
 #define AA_DEF_PROFILE "lxc-container-default"
 #define AA_DEF_PROFILE_CGNS "lxc-container-default-cgns"
 #define AA_MOUNT_RESTR "/sys/kernel/security/apparmor/features/mount/mask"
 #define AA_ENABLED_FILE "/sys/module/apparmor/parameters/enabled"
 #define AA_UNCHANGED "unchanged"
+#define AA_GENERATED "generated"
+
+#define AA_CMD_LOAD   'r'
+#define AA_CMD_UNLOAD 'R'
+#define AA_CMD_PARSE  'Q'
+
+static const char AA_PROFILE_BASE[] =
+"  ### Base profile\n"
+"  capability,\n"
+"  dbus,\n"
+"  file,\n"
+"  network,\n"
+"  umount,\n"
+"\n"
+"  # Allow us to receive signals from anywhere.\n"
+"  signal (receive),\n"
+"\n"
+"  # Allow us to send signals to ourselves\n"
+"  signal peer=@{profile_name},\n"
+"\n"
+"  # Allow other processes to read our /proc entries, futexes, perf tracing and\n"
+"  # kcmp for now (they will need 'read' in the first place). Administrators can\n"
+"  # override with:\n"
+"  #   deny ptrace (readby) ...\n"
+"  ptrace (readby),\n"
+"\n"
+"  # Allow other processes to trace us by default (they will need 'trace' in\n"
+"  # the first place). Administrators can override with:\n"
+"  #   deny ptrace (tracedby) ...\n"
+"  ptrace (tracedby),\n"
+"\n"
+"  # Allow us to ptrace ourselves\n"
+"  ptrace peer=@{profile_name},\n"
+"\n"
+"  # ignore DENIED message on / remount\n"
+"  deny mount options=(ro, remount) -> /,\n"
+"  deny mount options=(ro, remount, silent) -> /,\n"
+"\n"
+"  # allow tmpfs mounts everywhere\n"
+"  mount fstype=tmpfs,\n"
+"\n"
+"  # allow hugetlbfs mounts everywhere\n"
+"  mount fstype=hugetlbfs,\n"
+"\n"
+"  # allow mqueue mounts everywhere\n"
+"  mount fstype=mqueue,\n"
+"\n"
+"  # allow fuse mounts everywhere\n"
+"  mount fstype=fuse,\n"
+"  mount fstype=fuse.*,\n"
+"\n"
+"  # deny access under /proc/bus to avoid e.g. messing with pci devices directly\n"
+"  deny @{PROC}/bus/** wklx,\n"
+"\n"
+"  # deny writes in /proc/sys/fs but allow binfmt_misc to be mounted\n"
+"  mount fstype=binfmt_misc -> /proc/sys/fs/binfmt_misc/,\n"
+"  deny @{PROC}/sys/fs/** wklx,\n"
+"\n"
+"  # allow efivars to be mounted, writing to it will be blocked though\n"
+"  mount fstype=efivarfs -> /sys/firmware/efi/efivars/,\n"
+"\n"
+"  # block some other dangerous paths\n"
+"  deny @{PROC}/kcore rwklx,\n"
+"  deny @{PROC}/sysrq-trigger rwklx,\n"
+"\n"
+"  # deny writes in /sys except for /sys/fs/cgroup, also allow\n"
+"  # fusectl, securityfs and debugfs to be mounted there (read-only)\n"
+"  mount fstype=fusectl -> /sys/fs/fuse/connections/,\n"
+"  mount fstype=securityfs -> /sys/kernel/security/,\n"
+"  mount fstype=debugfs -> /sys/kernel/debug/,\n"
+"  deny mount fstype=debugfs -> /var/lib/ureadahead/debugfs/,\n"
+"  mount fstype=proc -> /proc/,\n"
+"  mount fstype=sysfs -> /sys/,\n"
+"  mount options=(rw, nosuid, nodev, noexec, remount) -> /sys/,\n"
+"  deny /sys/firmware/efi/efivars/** rwklx,\n"
+"  # note, /sys/kernel/security/** handled below\n"
+"  mount options=(move) /sys/fs/cgroup/cgmanager/ -> /sys/fs/cgroup/cgmanager.lower/,\n"
+"  mount options=(ro, nosuid, nodev, noexec, remount, strictatime) -> /sys/fs/cgroup/,\n"
+"\n"
+"  # deny reads from debugfs\n"
+"  deny /sys/kernel/debug/{,**} rwklx,\n"
+"\n"
+"  # allow paths to be made slave, shared, private or unbindable\n"
+"  # FIXME: This currently doesn't work due to the apparmor parser treating those as allowing all mounts.\n"
+"#  mount options=(rw,make-slave) -> **,\n"
+"#  mount options=(rw,make-rslave) -> **,\n"
+"#  mount options=(rw,make-shared) -> **,\n"
+"#  mount options=(rw,make-rshared) -> **,\n"
+"#  mount options=(rw,make-private) -> **,\n"
+"#  mount options=(rw,make-rprivate) -> **,\n"
+"#  mount options=(rw,make-unbindable) -> **,\n"
+"#  mount options=(rw,make-runbindable) -> **,\n"
+"\n"
+"  # allow bind-mounts of anything except /proc, /sys and /dev\n"
+"  mount options=(rw,bind) /[^spd]*{,/**},\n"
+"  mount options=(rw,bind) /d[^e]*{,/**},\n"
+"  mount options=(rw,bind) /de[^v]*{,/**},\n"
+"  mount options=(rw,bind) /dev/.[^l]*{,/**},\n"
+"  mount options=(rw,bind) /dev/.l[^x]*{,/**},\n"
+"  mount options=(rw,bind) /dev/.lx[^c]*{,/**},\n"
+"  mount options=(rw,bind) /dev/.lxc?*{,/**},\n"
+"  mount options=(rw,bind) /dev/[^.]*{,/**},\n"
+"  mount options=(rw,bind) /dev?*{,/**},\n"
+"  mount options=(rw,bind) /p[^r]*{,/**},\n"
+"  mount options=(rw,bind) /pr[^o]*{,/**},\n"
+"  mount options=(rw,bind) /pro[^c]*{,/**},\n"
+"  mount options=(rw,bind) /proc?*{,/**},\n"
+"  mount options=(rw,bind) /s[^y]*{,/**},\n"
+"  mount options=(rw,bind) /sy[^s]*{,/**},\n"
+"  mount options=(rw,bind) /sys?*{,/**},\n"
+"\n"
+"  # allow read-only bind-mounts of anything except /proc, /sys and /dev\n"
+"  mount options=(ro,remount,bind) -> /[^spd]*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /d[^e]*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /de[^v]*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /dev/.[^l]*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /dev/.l[^x]*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /dev/.lx[^c]*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /dev/.lxc?*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /dev/[^.]*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /dev?*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /p[^r]*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /pr[^o]*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /pro[^c]*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /proc?*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /s[^y]*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /sy[^s]*{,/**},\n"
+"  mount options=(ro,remount,bind) -> /sys?*{,/**},\n"
+"\n"
+"  # allow moving mounts except for /proc, /sys and /dev\n"
+"  mount options=(rw,move) /[^spd]*{,/**},\n"
+"  mount options=(rw,move) /d[^e]*{,/**},\n"
+"  mount options=(rw,move) /de[^v]*{,/**},\n"
+"  mount options=(rw,move) /dev/.[^l]*{,/**},\n"
+"  mount options=(rw,move) /dev/.l[^x]*{,/**},\n"
+"  mount options=(rw,move) /dev/.lx[^c]*{,/**},\n"
+"  mount options=(rw,move) /dev/.lxc?*{,/**},\n"
+"  mount options=(rw,move) /dev/[^.]*{,/**},\n"
+"  mount options=(rw,move) /dev?*{,/**},\n"
+"  mount options=(rw,move) /p[^r]*{,/**},\n"
+"  mount options=(rw,move) /pr[^o]*{,/**},\n"
+"  mount options=(rw,move) /pro[^c]*{,/**},\n"
+"  mount options=(rw,move) /proc?*{,/**},\n"
+"  mount options=(rw,move) /s[^y]*{,/**},\n"
+"  mount options=(rw,move) /sy[^s]*{,/**},\n"
+"  mount options=(rw,move) /sys?*{,/**},\n"
+"\n"
+"  # generated by: lxc-generate-aa-rules.py container-rules.base\n"
+"  deny /proc/sys/[^kn]*{,/**} wklx,\n"
+"  deny /proc/sys/k[^e]*{,/**} wklx,\n"
+"  deny /proc/sys/ke[^r]*{,/**} wklx,\n"
+"  deny /proc/sys/ker[^n]*{,/**} wklx,\n"
+"  deny /proc/sys/kern[^e]*{,/**} wklx,\n"
+"  deny /proc/sys/kerne[^l]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/[^smhd]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/d[^o]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/do[^m]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/dom[^a]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/doma[^i]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/domai[^n]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/domain[^n]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/domainn[^a]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/domainna[^m]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/domainnam[^e]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/domainname?*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/h[^o]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/ho[^s]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/hos[^t]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/host[^n]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/hostn[^a]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/hostna[^m]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/hostnam[^e]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/hostname?*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/m[^s]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/ms[^g]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/msg*/** wklx,\n"
+"  deny /proc/sys/kernel/s[^he]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/se[^m]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/sem*/** wklx,\n"
+"  deny /proc/sys/kernel/sh[^m]*{,/**} wklx,\n"
+"  deny /proc/sys/kernel/shm*/** wklx,\n"
+"  deny /proc/sys/kernel?*{,/**} wklx,\n"
+"  deny /proc/sys/n[^e]*{,/**} wklx,\n"
+"  deny /proc/sys/ne[^t]*{,/**} wklx,\n"
+"  deny /proc/sys/net?*{,/**} wklx,\n"
+"  deny /sys/[^fdck]*{,/**} wklx,\n"
+"  deny /sys/c[^l]*{,/**} wklx,\n"
+"  deny /sys/cl[^a]*{,/**} wklx,\n"
+"  deny /sys/cla[^s]*{,/**} wklx,\n"
+"  deny /sys/clas[^s]*{,/**} wklx,\n"
+"  deny /sys/class/[^n]*{,/**} wklx,\n"
+"  deny /sys/class/n[^e]*{,/**} wklx,\n"
+"  deny /sys/class/ne[^t]*{,/**} wklx,\n"
+"  deny /sys/class/net?*{,/**} wklx,\n"
+"  deny /sys/class?*{,/**} wklx,\n"
+"  deny /sys/d[^e]*{,/**} wklx,\n"
+"  deny /sys/de[^v]*{,/**} wklx,\n"
+"  deny /sys/dev[^i]*{,/**} wklx,\n"
+"  deny /sys/devi[^c]*{,/**} wklx,\n"
+"  deny /sys/devic[^e]*{,/**} wklx,\n"
+"  deny /sys/device[^s]*{,/**} wklx,\n"
+"  deny /sys/devices/[^v]*{,/**} wklx,\n"
+"  deny /sys/devices/v[^i]*{,/**} wklx,\n"
+"  deny /sys/devices/vi[^r]*{,/**} wklx,\n"
+"  deny /sys/devices/vir[^t]*{,/**} wklx,\n"
+"  deny /sys/devices/virt[^u]*{,/**} wklx,\n"
+"  deny /sys/devices/virtu[^a]*{,/**} wklx,\n"
+"  deny /sys/devices/virtua[^l]*{,/**} wklx,\n"
+"  deny /sys/devices/virtual/[^n]*{,/**} wklx,\n"
+"  deny /sys/devices/virtual/n[^e]*{,/**} wklx,\n"
+"  deny /sys/devices/virtual/ne[^t]*{,/**} wklx,\n"
+"  deny /sys/devices/virtual/net?*{,/**} wklx,\n"
+"  deny /sys/devices/virtual?*{,/**} wklx,\n"
+"  deny /sys/devices?*{,/**} wklx,\n"
+"  deny /sys/f[^s]*{,/**} wklx,\n"
+"  deny /sys/fs/[^c]*{,/**} wklx,\n"
+"  deny /sys/fs/c[^g]*{,/**} wklx,\n"
+"  deny /sys/fs/cg[^r]*{,/**} wklx,\n"
+"  deny /sys/fs/cgr[^o]*{,/**} wklx,\n"
+"  deny /sys/fs/cgro[^u]*{,/**} wklx,\n"
+"  deny /sys/fs/cgrou[^p]*{,/**} wklx,\n"
+"  deny /sys/fs/cgroup?*{,/**} wklx,\n"
+"  deny /sys/fs?*{,/**} wklx,\n"
+;
+
+static const char AA_PROFILE_UNIX_SOCKETS[] =
+"\n"
+"  ### Feature: unix\n"
+"  # Allow receive via unix sockets from anywhere\n"
+"  unix (receive),\n"
+"\n"
+"  # Allow all unix sockets in the container\n"
+"  unix peer=(label=@{profile_name}),\n"
+;
+
+static const char AA_PROFILE_CGROUP_NAMESPACES[] =
+"\n"
+"  ### Feature: cgroup namespace\n"
+"  mount fstype=cgroup -> /sys/fs/cgroup/**,\n"
+;
+
+/* '_BASE' because we still need to append generated change_profile rules */
+static const char AA_PROFILE_STACKING_BASE[] =
+"\n"
+"  ### Feature: apparmor stacking\n"
+"  ### Configuration: apparmor profile loading (in namespace)\n"
+"  deny /sys/k[^e]*{,/**} wklx,\n"
+"  deny /sys/ke[^r]*{,/**} wklx,\n"
+"  deny /sys/ker[^n]*{,/**} wklx,\n"
+"  deny /sys/kern[^e]*{,/**} wklx,\n"
+"  deny /sys/kerne[^l]*{,/**} wklx,\n"
+"  deny /sys/kernel/[^s]*{,/**} wklx,\n"
+"  deny /sys/kernel/s[^e]*{,/**} wklx,\n"
+"  deny /sys/kernel/se[^c]*{,/**} wklx,\n"
+"  deny /sys/kernel/sec[^u]*{,/**} wklx,\n"
+"  deny /sys/kernel/secu[^r]*{,/**} wklx,\n"
+"  deny /sys/kernel/secur[^i]*{,/**} wklx,\n"
+"  deny /sys/kernel/securi[^t]*{,/**} wklx,\n"
+"  deny /sys/kernel/securit[^y]*{,/**} wklx,\n"
+"  deny /sys/kernel/security/[^a]*{,/**} wklx,\n"
+"  deny /sys/kernel/security/a[^p]*{,/**} wklx,\n"
+"  deny /sys/kernel/security/ap[^p]*{,/**} wklx,\n"
+"  deny /sys/kernel/security/app[^a]*{,/**} wklx,\n"
+"  deny /sys/kernel/security/appa[^r]*{,/**} wklx,\n"
+"  deny /sys/kernel/security/appar[^m]*{,/**} wklx,\n"
+"  deny /sys/kernel/security/apparm[^o]*{,/**} wklx,\n"
+"  deny /sys/kernel/security/apparmo[^r]*{,/**} wklx,\n"
+"  deny /sys/kernel/security/apparmor?*{,/**} wklx,\n"
+"  deny /sys/kernel/security?*{,/**} wklx,\n"
+"  deny /sys/kernel?*{,/**} wklx,\n"
+;
+
+static const char AA_PROFILE_NO_STACKING[] =
+"\n"
+"  ### Feature: apparmor stacking (not present)\n"
+"  deny /sys/k*{,/**} rwklx,\n"
+;
+
+/* '_BASE' because we need to append change_profile for stacking */
+static const char AA_PROFILE_NESTING_BASE[] =
+"\n"
+"  ### Configuration: nesting\n"
+"  pivot_root,\n"
+"  ptrace,\n"
+"  signal,\n"
+"\n"
+   /* NOTE: See conf.c's "nesting_helpers" for details. */
+"  deny /dev/.lxc/proc/** rw,\n"
+"  deny /dev/.lxc/sys/** rw,\n"
+"\n"
+"  mount fstype=proc -> /usr/lib/*/lxc/**,\n"
+"  mount fstype=sysfs -> /usr/lib/*/lxc/**,\n"
+"  mount options=(rw,bind),\n"
+"  mount options=(rw,rbind),\n"
+"  mount options=(rw,make-rshared),\n"
+"\n"
+   /* FIXME: What's the state here on apparmor's side? */
+"  # there doesn't seem to be a way to ask for:\n"
+"  # mount options=(ro,nosuid,nodev,noexec,remount,bind),\n"
+"  # as we always get mount to $cdir/proc/sys with those flags denied\n"
+"  # So allow all mounts until that is straightened out:\n"
+"  mount,\n"
+;
+
+static const char AA_PROFILE_UNPRIVILEGED[] =
+"\n"
+"  ### Configuration: unprivileged container\n"
+"  pivot_root,\n"
+"\n"
+"  # Allow modifying mount propagation\n"
+"  mount options=(rw,make-slave) -> **,\n"
+"  mount options=(rw,make-rslave) -> **,\n"
+"  mount options=(rw,make-shared) -> **,\n"
+"  mount options=(rw,make-rshared) -> **,\n"
+"  mount options=(rw,make-private) -> **,\n"
+"  mount options=(rw,make-rprivate) -> **,\n"
+"  mount options=(rw,make-unbindable) -> **,\n"
+"  mount options=(rw,make-runbindable) -> **,\n"
+"\n"
+"  # Allow all bind-mounts\n"
+"  mount options=(rw,bind),\n"
+"  mount options=(rw,rbind),\n"
+"\n"
+"  # Allow remounting things read-only\n"
+"  mount options=(ro,remount),\n"
+;
 
 static bool check_mount_feature_enabled(void)
 {
@@ -143,11 +479,6 @@ static bool apparmor_am_unconfined(void)
 	return ret;
 }
 
-/* aa stacking is not yet supported */
-static bool aa_stacking_supported(void) {
-	return false;
-}
-
 static bool aa_needs_transition(char *curlabel)
 {
 	if (!curlabel)
@@ -157,6 +488,528 @@ static bool aa_needs_transition(char *curlabel)
 	if (strcmp(curlabel, "/usr/bin/lxc-start") == 0)
 		return false;
 	return true;
+}
+
+static inline char *shorten_apparmor_name(char *name)
+{
+	size_t len = strlen(name);
+	if (len + 7 > 253) {
+		uint64_t hash = fnv_64a_buf(name, len, FNV1A_64_INIT);
+		name = must_realloc(name, 16+1);
+		(void)snprintf(name, 16 + 1, "%016" PRIx64, hash);
+	}
+
+	return name;
+}
+
+static inline char *apparmor_profile_short(const char *ctname)
+{
+	return shorten_apparmor_name(must_concat("lxc-", ctname, NULL));
+}
+
+static inline char *apparmor_profile_full(const char *ctname)
+{
+	return shorten_apparmor_name(must_concat("lxc-", ctname, "_<", LXCPATH, ">", NULL));
+}
+
+static inline char *apparmor_namespace(const char *ctname)
+{
+	return shorten_apparmor_name(must_concat("lxc-", ctname, "_<", sanitized_lxcpath, ">", NULL));
+}
+
+static bool check_apparmor_parser_version()
+{
+	struct lxc_popen_FILE *parserpipe;
+	int rc, major = 0, minor = 0, micro = 0;
+
+	parserpipe = lxc_popen("apparmor_parser --version");
+	if (!parserpipe) {
+		SYSERROR("Failed to run apparmor_parser");
+		return false;
+	}
+
+	rc = fscanf(parserpipe->f, "AppArmor parser version %d.%d.%d", &major, &minor, &micro);
+	if (rc < 1) {
+		lxc_pclose(parserpipe);
+		ERROR("failed to parse version output of apparmor_parser");
+		return false;
+	}
+
+	rc = lxc_pclose(parserpipe);
+	if (rc < 0) {
+		SYSERROR("Error waiting for child process");
+		return false;
+	}
+	if (rc != 0) {
+		ERROR("'apparmor_parser --version' executed with an error status");
+		return false;
+	}
+
+	aa_supports_unix = (major > 2) ||
+	                   (major == 2 && minor > 10) ||
+	                   (major == 2 && minor == 10 && micro >= 95);
+
+	return true;
+}
+
+static bool file_is_yes(const char *path)
+{
+	ssize_t rd;
+	FILE *f;
+	char buf[8]; /* we expect "yes" or "no" */
+
+	f = fopen(path, "r");
+	if (!f)
+		return false;
+
+	rd = fread(buf, 1, sizeof(buf), f);
+	fclose(f);
+
+	return rd >= 4 && strncmp(buf, "yes\n", 4) == 0;
+}
+
+static bool apparmor_can_stack()
+{
+	int major, minor, scanned;
+	FILE *f;
+
+	if (!file_is_yes("/sys/kernel/security/apparmor/features/domain/stack"))
+		return false;
+
+	f = fopen("/sys/kernel/security/apparmor/features/domain/version", "r");
+	if (!f)
+		return false;
+
+	scanned = fscanf(f, "%d.%d", &major, &minor);
+	fclose(f);
+	if (scanned != 2)
+		return false;
+
+	return major >= 1 && minor >= 2;
+}
+
+static void make_sanitized_lxcpath()
+{
+	const char *lxcpath = LXCPATH;
+	size_t i, len;
+
+	while (lxcpath[0] == '/')
+		++lxcpath;
+
+	len = strlen(lxcpath);
+	for (i = 0; i != len; ++i)
+		sanitized_lxcpath[i] = (lxcpath[i] == '/') ? '-' : lxcpath[i];
+	sanitized_lxcpath[len] = 0;
+}
+
+static void must_append_sized_full(char **buf, size_t *bufsz, const char *data,
+				   size_t size, bool append_newline)
+{
+	size_t newsize = *bufsz + size;
+
+	if (append_newline)
+		++newsize;
+
+	*buf = must_realloc(*buf, newsize);
+	memcpy(*buf + *bufsz, data, size);
+
+	if (append_newline)
+		(*buf)[newsize - 1] = '\n';
+
+	*bufsz = newsize;
+}
+
+static void must_append_sized(char **buf, size_t *bufsz, const char *data, size_t size)
+{
+	return must_append_sized_full(buf, bufsz, data, size, false);
+}
+
+static bool is_privileged(struct lxc_conf *conf)
+{
+	return lxc_list_empty(&conf->id_map);
+}
+
+static char *get_apparmor_profile_content(struct lxc_conf *conf)
+{
+	char *profile, *profile_name_full;
+	size_t size;
+	struct lxc_list *it;
+
+	profile_name_full = apparmor_profile_full(conf->name);
+
+	profile = must_concat(
+"#include <tunables/global>\n"
+"profile \"", profile_name_full, "\" flags=(attach_disconnected,mediate_deleted) {\n",
+	                      NULL);
+	size = strlen(profile);
+
+	must_append_sized(&profile, &size, AA_PROFILE_BASE,
+	                  sizeof(AA_PROFILE_BASE) - 1);
+
+	if (aa_supports_unix) {
+		must_append_sized(&profile, &size, AA_PROFILE_UNIX_SOCKETS,
+		                  sizeof(AA_PROFILE_UNIX_SOCKETS) - 1);
+	}
+
+	if (file_exists("/proc/self/ns/cgroup")) {
+		must_append_sized(&profile, &size, AA_PROFILE_CGROUP_NAMESPACES,
+		                  sizeof(AA_PROFILE_CGROUP_NAMESPACES) - 1);
+	}
+
+	if (aa_can_stack && !aa_is_stacked) {
+		char *namespace, *temp;
+
+		must_append_sized(&profile, &size, AA_PROFILE_STACKING_BASE,
+		                  sizeof(AA_PROFILE_STACKING_BASE) - 1);
+
+		namespace = apparmor_namespace(conf->name);
+		temp = must_concat("  change_profile -> \":", namespace, ":*\",\n"
+		                   "  change_profile -> \":", namespace, "://*\",\n",
+		                   NULL);
+		free(namespace);
+
+		must_append_sized(&profile, &size, temp, strlen(temp));
+		free(temp);
+	} else {
+		must_append_sized(&profile, &size, AA_PROFILE_NO_STACKING,
+		                  sizeof(AA_PROFILE_NO_STACKING) - 1);
+	}
+
+	if (conf->lsm_aa_allow_nesting) {
+		must_append_sized(&profile, &size, AA_PROFILE_NESTING_BASE,
+		                  sizeof(AA_PROFILE_NESTING_BASE) - 1);
+
+		if (!aa_can_stack || aa_is_stacked) {
+			char *temp;
+			temp = must_concat("  change_profile -> \"",
+			                   profile_name_full, "\",\n", NULL);
+			must_append_sized(&profile, &size, temp, strlen(temp));
+			free(temp);
+		}
+	}
+
+	if (!is_privileged(conf) || am_host_unpriv()) {
+		must_append_sized(&profile, &size, AA_PROFILE_UNPRIVILEGED,
+		                  sizeof(AA_PROFILE_UNPRIVILEGED) - 1);
+	}
+
+	lxc_list_for_each(it, &conf->lsm_aa_raw) {
+		const char *line = it->elem;
+
+		must_append_sized_full(&profile, &size, line, strlen(line), true);
+	}
+
+	/* include terminating \0 byte */
+	must_append_sized(&profile, &size, "}\n", 3);
+
+	free(profile_name_full);
+
+	return profile;
+}
+
+static char *make_apparmor_profile_path(const char *ctname, const char *cached_profile)
+{
+	char *path, *profile = NULL;
+
+	if (!cached_profile)
+		cached_profile = profile = apparmor_profile_short(ctname);
+
+	path = must_make_path(aa_profile_path, profile, NULL);
+	free(profile);
+
+	return path;
+}
+
+static char *make_apparmor_namespace_path(const char *ctname)
+{
+	char *ret, *namespace;
+
+	namespace = apparmor_namespace(ctname);
+	ret = must_make_path("/sys/kernel/security/apparmor/policy/namespaces", namespace, NULL);
+	free(namespace);
+
+	return ret;
+}
+
+static bool make_apparmor_namespace(struct lxc_conf *conf)
+{
+	char *path;
+
+	if (!aa_can_stack || aa_is_stacked)
+		return true;
+
+	path = make_apparmor_namespace_path(conf->name);
+	errno = 0;
+	if (mkdir(path, 0755) < 0 && errno != EEXIST) {
+		SYSERROR("error creating apparmor namespace: %s", path);
+		free(path);
+		return false;
+	}
+	free(path);
+
+	return true;
+}
+
+static void remove_apparmor_namespace(struct lxc_conf *conf)
+{
+	char *path;
+
+	path = make_apparmor_namespace_path(conf->name);
+	if (rmdir(path) != 0)
+		SYSERROR("Error removing apparmor namespace");
+	free(path);
+}
+
+struct apparmor_parser_args {
+	char cmd;
+	char *file;
+};
+
+static int apparmor_parser_exec(void *data)
+{
+	struct apparmor_parser_args *args = data;
+	char cmdbuf[] = { '-', args->cmd, 'W', 'L', 0 };
+
+	execlp("apparmor_parser", "apparmor_parser", cmdbuf, aa_cache_path, args->file, NULL);
+
+	return -1;
+}
+
+static int run_apparmor_parser(char command, struct lxc_conf *conf)
+{
+	char output[MAXPATHLEN];
+	int ret;
+	struct apparmor_parser_args args = {
+		.cmd = command,
+		.file = make_apparmor_profile_path(conf->name, NULL),
+	};
+
+	ret = run_command(output, sizeof(output), apparmor_parser_exec, (void*)&args);
+	if (ret < 0) {
+		ERROR("Failed to run apparmor_parser on \"%s\": %s", args.file, output);
+		free(args.file);
+		return -1;
+	}
+
+	free(args.file);
+	return 0;
+}
+
+static void remove_apparmor_profile(struct lxc_conf *conf)
+{
+	char *profile, *path;
+
+	/* It's ok if these deletes fail: if the container was never started,
+	 * we'll have never written a profile or cached it.
+	 */
+	profile = apparmor_profile_short(conf->name);
+	path = must_make_path(aa_cache_path, profile, NULL);
+	if (path) {
+		(void)rmdir(path);
+		free(path);
+	}
+	path = make_apparmor_profile_path(conf->name, profile);
+	if (path) {
+		(void)rmdir(path);
+		free(path);
+	}
+	free(profile);
+}
+
+static int load_apparmor_profile(struct lxc_conf *conf)
+{
+	struct stat profile_sb;
+	size_t content_len;
+	int ret = -1;
+	size_t old_len = 0;
+	char *profile_path = NULL, *old_content = NULL, *new_content = NULL;
+	int profile_fd = -1;
+
+	if (!aa_admin)
+		return 0;
+
+	if (!make_apparmor_namespace(conf))
+		return -1;
+
+	/* In order to avoid forcing a profile parse (potentially slow) on
+	 * every container start, let's use apparmor's binary policy cache,
+	 * which checks mtime of the files to figure out if the policy needs to
+	 * be regenerated.
+	 *
+	 * Since it uses mtimes, we shouldn't just always write out our local
+	 * apparmor template; instead we should check to see whether the
+	 * template is the same as ours. If it isn't we should write our
+	 * version out so that the new changes are reflected and we definitely
+	 * force a recompile.
+	 */
+
+	profile_path = make_apparmor_profile_path(conf->name, NULL);
+	profile_fd = open(profile_path, O_RDONLY);
+	if (profile_fd >= 0) {
+		if (fstat(profile_fd, &profile_sb) < 0) {
+			SYSERROR("Error accessing old profile from %s",
+			         profile_path);
+			goto out;
+		}
+		old_len = profile_sb.st_size;
+		old_content = lxc_strmmap(NULL, old_len, PROT_READ,
+		                          MAP_PRIVATE, profile_fd, 0);
+		if (!old_content) {
+			SYSERROR("Failed to mmap old profile from %s",
+			         profile_path);
+			goto out;
+		}
+	} else if (errno != ENOENT) {
+		SYSERROR("Error reading old profile from %s", profile_path);
+		goto out;
+	}
+
+	new_content = get_apparmor_profile_content(conf);
+	if (!new_content)
+		goto out;
+
+	content_len = strlen(new_content);
+
+	if (!old_content || old_len != content_len || memcmp(old_content, new_content, content_len) != 0) {
+		if (mkdir_p(aa_cache_path, 0755) != 0) {
+			SYSERROR("Error creating apparmor profile cache directory %s", aa_cache_path);
+			goto out;
+		}
+
+		(void)mkdir_p(aa_profile_path, 0755);
+		if (lxc_write_to_file(profile_path, new_content, content_len, false, 0600) == -1) {
+			SYSERROR("Error writing profile to %s", profile_path);
+			goto out;
+		}
+	}
+
+	ret = run_apparmor_parser(AA_CMD_LOAD, conf);
+	if (ret != 0)
+		goto out_remove_profile;
+
+	conf->lsm_aa_profile_created = true;
+
+	goto out_ok;
+
+out_remove_profile:
+	remove_apparmor_profile(conf);
+out:
+	remove_apparmor_namespace(conf);
+out_ok:
+	if (profile_fd >= 0) {
+		if (old_content)
+			lxc_strmunmap(old_content, old_len);
+		close(profile_fd);
+	}
+	free(profile_path);
+	free(new_content);
+	return ret;
+}
+
+/*
+ * Ensure that the container's policy namespace is unloaded to free kernel
+ * memory. This does not delete the policy from disk or cache.
+ */
+static void apparmor_cleanup(struct lxc_conf *conf)
+{
+	if (!aa_admin)
+		return;
+
+	if (!conf->lsm_aa_profile_created)
+		return;
+
+	remove_apparmor_namespace(conf);
+	(void)run_apparmor_parser(AA_CMD_UNLOAD, conf);
+
+	remove_apparmor_profile(conf);
+}
+
+static int apparmor_prepare(struct lxc_conf *conf)
+{
+	int ret = -1;
+	const char *label;
+	char *curlabel = NULL, *genlabel = NULL;
+
+	if (!aa_enabled)
+		return 0;
+
+	label = conf->lsm_aa_profile;
+
+	/* user may request that we just ignore apparmor */
+	if (label && strcmp(label, AA_UNCHANGED) == 0) {
+		INFO("apparmor profile unchanged per user request");
+		conf->lsm_aa_profile_computed = must_copy_string(label);
+		return 0;
+	}
+
+	if (label && strcmp(label, AA_GENERATED) == 0) {
+		/* auto-generate profile based on available/requested security features */
+		if (load_apparmor_profile(conf) != 0) {
+			ERROR("failed to load generated apparmor profile");
+			goto out;
+		}
+
+		genlabel = apparmor_profile_full(conf->name);
+		if (!genlabel) {
+			ERROR("failed to build apparmor profile name");
+			goto out;
+		}
+
+		if (aa_can_stack && !aa_is_stacked) {
+			char *namespace = apparmor_namespace(conf->name);
+			size_t llen = strlen(genlabel);
+			must_append_sized(&genlabel, &llen, "//&:", sizeof("//&:") - 1);
+			must_append_sized(&genlabel, &llen, namespace, strlen(namespace));
+			must_append_sized(&genlabel, &llen, ":", sizeof(":")); /* with the nul byte */
+			free(namespace);
+		}
+
+		label = genlabel;
+	}
+
+	curlabel = apparmor_process_label_get(lxc_raw_getpid());
+
+	if (!aa_can_stack && aa_needs_transition(curlabel)) {
+		/* we're already confined, and stacking isn't supported */
+
+		if (!label || strcmp(curlabel, label) == 0) {
+			/* no change requested */
+			ret = 0;
+			goto out;
+		}
+
+		ERROR("already apparmor confined, but new label requested.");
+		goto out;
+	}
+
+	if (!label) {
+		if (cgns_supported())
+			label = AA_DEF_PROFILE_CGNS;
+		else
+			label = AA_DEF_PROFILE;
+	}
+
+	if (!check_mount_feature_enabled() && strcmp(label, "unconfined") != 0) {
+		WARN("Incomplete AppArmor support in your kernel");
+		if (!conf->lsm_aa_allow_incomplete) {
+			ERROR("If you really want to start this container, set");
+			ERROR("lxc.apparmor.allow_incomplete = 1");
+			ERROR("in your container configuration file");
+			goto out;
+		}
+	}
+
+	conf->lsm_aa_profile_computed = must_copy_string(label);
+	ret = 0;
+
+out:
+	if (genlabel) {
+		free(genlabel);
+		if (ret != 0)
+			apparmor_cleanup(conf);
+	}
+	free(curlabel);
+	return ret;
 }
 
 /*
@@ -172,60 +1025,28 @@ static bool aa_needs_transition(char *curlabel)
  * Notes: This relies on /proc being available.
  */
 static int apparmor_process_label_set(const char *inlabel, struct lxc_conf *conf,
-				      bool use_default, bool on_exec)
+				      bool on_exec)
 {
 	int label_fd, ret;
 	pid_t tid;
-	const char *label = inlabel ? inlabel : conf->lsm_aa_profile;
-	char *curlabel;
+	const char *label;
 
-	if (!aa_enabled)
-		return 0;
+	if (!aa_enabled) {
+		ERROR("AppArmor not enabled");
+		return -1;
+	}
+
+	label = inlabel ? inlabel : conf->lsm_aa_profile_computed;
+	if (!label) {
+		ERROR("lsm wasn't prepared");
+		return -1;
+	}
 
 	/* user may request that we just ignore apparmor */
-	if (label && strcmp(label, AA_UNCHANGED) == 0) {
+	if (strcmp(label, AA_UNCHANGED) == 0) {
 		INFO("apparmor profile unchanged per user request");
 		return 0;
 	}
-
-	curlabel = apparmor_process_label_get(lxc_raw_getpid());
-
-	if (!aa_stacking_supported() && aa_needs_transition(curlabel)) {
-		/* we're already confined, and stacking isn't supported */
-
-		if (!label || strcmp(curlabel, label) == 0) {
-			/* no change requested */
-			free(curlabel);
-			return 0;
-		}
-
-		ERROR("already apparmor confined, but new label requested.");
-		free(curlabel);
-		return -1;
-	}
-	free(curlabel);
-
-	if (!label) {
-		if (use_default) {
-			if (cgns_supported())
-				label = AA_DEF_PROFILE_CGNS;
-			else
-				label = AA_DEF_PROFILE;
-		}
-		else
-			label = "unconfined";
-	}
-
-	if (!check_mount_feature_enabled() && strcmp(label, "unconfined") != 0) {
-		WARN("Incomplete AppArmor support in your kernel");
-		if (!conf->lsm_aa_allow_incomplete) {
-			ERROR("If you really want to start this container, set");
-			ERROR("lxc.apparmor.allow_incomplete = 1");
-			ERROR("in your container configuration file");
-			return -1;
-		}
-	}
-
 
 	if (strcmp(label, "unconfined") == 0 && apparmor_am_unconfined()) {
 		INFO("apparmor profile unchanged");
@@ -254,12 +1075,52 @@ static struct lsm_drv apparmor_drv = {
 	.enabled           = apparmor_enabled,
 	.process_label_get = apparmor_process_label_get,
 	.process_label_set = apparmor_process_label_set,
+	.prepare           = apparmor_prepare,
+	.cleanup           = apparmor_cleanup,
 };
 
 struct lsm_drv *lsm_apparmor_drv_init(void)
 {
+	int ret;
+	bool have_mac_admin = false;
+
 	if (!apparmor_enabled())
 		return NULL;
+
+	ret = snprintf(aa_cache_path, sizeof(aa_cache_path), "%s/.apparmor/cache", LXCPATH);
+	if (ret < 0 || ret >= sizeof(aa_cache_path)) {
+		ERROR("Failed to build apparmor cache path");
+		return NULL;
+	}
+
+	ret = snprintf(aa_profile_path, sizeof(aa_profile_path), "%s/.apparmor/profiles", LXCPATH);
+	if (ret < 0 || ret >= sizeof(aa_profile_path)) {
+		ERROR("Failed to build apparmor profile path");
+		return NULL;
+	}
+
+	aa_can_stack = apparmor_can_stack();
+	if (aa_can_stack)
+		aa_is_stacked = file_is_yes("/sys/kernel/security/apparmor/.ns_stacked");
+
+	if (!check_apparmor_parser_version())
+		return NULL;
+
+	make_sanitized_lxcpath();
+
+	#if HAVE_LIBCAP
+	have_mac_admin = lxc_proc_cap_is_set(CAP_SETGID, CAP_EFFECTIVE);
+	#endif
+
+	aa_admin = true;
+	if (!have_mac_admin) {
+		WARN("Per-container AppArmor profiles are disabled because the mac_admin capability is missing");
+	} else if (!am_host_unpriv() || !aa_is_stacked) {
+		WARN("Per-container AppArmor profiles are disabled because LXC is running in an unprivileged container without stacking");
+	} else {
+		aa_admin = true;
+	}
+
 	aa_enabled = 1;
 	return &apparmor_drv;
 }
