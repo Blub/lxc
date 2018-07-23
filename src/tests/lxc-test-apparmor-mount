@@ -160,73 +160,113 @@ fi
 run_cmd lxc-create -t download -n $cname -- -d ubuntu -r $release -a $ARCH
 
 echo "test default confined container"
-run_cmd lxc-start -n $cname -d
+run_cmd lxc-start -n $cname -d -lDEBUG -o /tmp/lxc-aa-test.log
 run_cmd lxc-wait -n $cname -s RUNNING
 pid=`run_cmd lxc-info -p -H -n $cname`
 profile=`cat /proc/$pid/attr/current`
 if [ "x$profile" != "x${default_profile}" ]; then
 	echo "FAIL: confined container was in profile $profile"
+	echo 'LOG:'
+	cat /tmp/lxc-aa-test.log
+	echo
+	echo 'LOG END'
+	rm -f /tmp/lxc-aa-test.log
 	exit 1
 fi
 run_cmd lxc-stop -n $cname -k
+rm -f /tmp/lxc-aa-test.log
 
 echo "test regular unconfined container"
 echo "lxc.apparmor.profile = unconfined" >> $HDIR/.local/share/lxc/$cname/config
-run_cmd lxc-start -n $cname -d
+run_cmd lxc-start -n $cname -d -lDEBUG -o /tmp/lxc-aa-test.log
 run_cmd lxc-wait -n $cname -s RUNNING
 pid=`run_cmd lxc-info -p -H -n $cname`
 profile=`cat /proc/$pid/attr/current`
 if [ "x$profile" != "xunconfined" ]; then
 	echo "FAIL: unconfined container was in profile $profile"
+	echo 'LOG:'
+	cat /tmp/lxc-aa-test.log
+	echo
+	echo 'LOG END'
+	rm -f /tmp/lxc-aa-test.log
 	exit 1
 fi
 run_cmd lxc-stop -n $cname -k
+rm -f /tmp/lxc-aa-test.log
 
 echo "masking $MOUNTSR"
 mount --bind $dnam $MOUNTSR
 
 echo "test default confined container"
 sed -i '/apparmor.profile/d' $HDIR/.local/share/lxc/$cname/config
-run_cmd lxc-start -n $cname -d || true
+run_cmd lxc-start -n $cname -d -lDEBUG -o /tmp/lxc-aa-test.log || true
 sleep 3
 pid=`run_cmd lxc-info -p -H -n $cname` || true
 if [ -n "$pid" -a "$pid" != "-1" ]; then
 	echo "FAIL: confined container started without mount restrictions"
 	echo "pid was $pid"
+	echo 'LOG:'
+	cat /tmp/lxc-aa-test.log
+	echo
+	echo 'LOG END'
+	rm -f /tmp/lxc-aa-test.log
 	exit 1
 fi
+rm -f /tmp/lxc-aa-test.log
 
 echo "test regular unconfined container"
 echo "lxc.apparmor.profile = unconfined" >> $HDIR/.local/share/lxc/$cname/config
-run_cmd lxc-start -n $cname -d
+run_cmd lxc-start -n $cname -d -lDEBUG -o /tmp/lxc-aa-test.log
 run_cmd lxc-wait -n $cname -s RUNNING
 pid=`run_cmd lxc-info -p -H -n $cname`
 if [ "$pid" = "-1" ]; then
 	echo "FAIL: unconfined container failed to start without mount restrictions"
+	echo 'LOG:'
+	cat /tmp/lxc-aa-test.log
+	echo
+	echo 'LOG END'
+	rm -f /tmp/lxc-aa-test.log
 	exit 1
 fi
 profile=`cat /proc/$pid/attr/current`
 if [ "x$profile" != "xunconfined" ]; then
 	echo "FAIL: confined container was in profile $profile"
+	echo 'LOG:'
+	cat /tmp/lxc-aa-test.log
+	echo
+	echo 'LOG END'
+	rm -f /tmp/lxc-aa-test.log
 	exit 1
 fi
 run_cmd lxc-stop -n $cname -k
+rm -f /tmp/lxc-aa-test.log
 
 echo "testing override"
 sed -i '/apparmor.profile/d' $HDIR/.local/share/lxc/$cname/config
 echo "lxc.apparmor.allow_incomplete = 1" >> $HDIR/.local/share/lxc/$cname/config
-run_cmd lxc-start -n $cname -d
+run_cmd lxc-start -n $cname -d -lDEBUG -o /tmp/lxc-aa-test.log
 run_cmd lxc-wait -n $cname -s RUNNING
 pid=`run_cmd lxc-info -p -H -n $cname`
 if [ "$pid" = "-1" ]; then
 	echo "FAIL: excepted container failed to start without mount restrictions"
+	echo 'LOG:'
+	cat /tmp/lxc-aa-test.log
+	echo
+	echo 'LOG END'
+	rm -f /tmp/lxc-aa-test.log
 	exit 1
 fi
 profile=`cat /proc/$pid/attr/current`
 if [ "x$profile" != "x${default_profile}" ]; then
 	echo "FAIL: confined container was in profile $profile"
+	echo 'LOG:'
+	cat /tmp/lxc-aa-test.log
+	echo
+	echo 'LOG END'
+	rm -f /tmp/lxc-aa-test.log
 	exit 1
 fi
 run_cmd lxc-stop -n $cname -k
+rm -f /tmp/lxc-aa-test.log
 
 DONE=1
