@@ -1991,17 +1991,17 @@ int __lxc_start(const char *name, struct lxc_handler *handler,
 		goto out_fini_nonet;
 	}
 
-	if (!cgroup_ops->monitor_create(cgroup_ops, handler)) {
-		ERROR("Failed to create monitor cgroup");
-		ret = -1;
-		goto out_fini_nonet;
-	}
+	//if (!cgroup_ops->monitor_create(cgroup_ops, handler)) {
+	//	ERROR("Failed to create monitor cgroup");
+	//	ret = -1;
+	//	goto out_fini_nonet;
+	//}
 
-	if (!cgroup_ops->monitor_enter(cgroup_ops, handler->monitor_pid)) {
-		ERROR("Failed to enter monitor cgroup");
-		ret = -1;
-		goto out_fini_nonet;
-	}
+	//if (!cgroup_ops->monitor_enter(cgroup_ops, handler->monitor_pid)) {
+	//	ERROR("Failed to enter monitor cgroup");
+	//	ret = -1;
+	//	goto out_fini_nonet;
+	//}
 
 	if (geteuid() == 0 && !lxc_list_empty(&conf->id_map)) {
 		/* If the backing store is a device, mount it here and now. */
