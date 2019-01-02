@@ -1886,7 +1886,7 @@ int __lxc_start(struct lxc_handler *handler, struct lxc_operations *ops,
 	int ret, status;
 	const char *name = handler->name;
 	struct lxc_conf *conf = handler->conf;
-	struct cgroup_ops *cgroup_ops;
+	//struct cgroup_ops *cgroup_ops;
 
 	ret = lxc_init(name, handler);
 	if (ret < 0) {
@@ -1896,7 +1896,7 @@ int __lxc_start(struct lxc_handler *handler, struct lxc_operations *ops,
 	handler->ops = ops;
 	handler->data = data;
 	handler->daemonize = daemonize;
-	cgroup_ops = handler->cgroup_ops;
+	//cgroup_ops = handler->cgroup_ops;
 
 	if (!attach_block_device(handler->conf)) {
 		ERROR("Failed to attach block device");
@@ -1904,23 +1904,23 @@ int __lxc_start(struct lxc_handler *handler, struct lxc_operations *ops,
 		goto out_abort;
 	}
 
-	if (!cgroup_ops->monitor_create(cgroup_ops, handler)) {
-		ERROR("Failed to create monitor cgroup");
-		ret = -1;
-		goto out_abort;
-	}
+	//if (!cgroup_ops->monitor_create(cgroup_ops, handler)) {
+	//	ERROR("Failed to create monitor cgroup");
+	//	ret = -1;
+	//	goto out_abort;
+	//}
 
-	if (!cgroup_ops->monitor_enter(cgroup_ops, handler)) {
-		ERROR("Failed to enter monitor cgroup");
-		ret = -1;
-		goto out_abort;
-	}
+	//if (!cgroup_ops->monitor_enter(cgroup_ops, handler)) {
+	//	ERROR("Failed to enter monitor cgroup");
+	//	ret = -1;
+	//	goto out_abort;
+	//}
 
-	if (!cgroup_ops->monitor_delegate_controllers(cgroup_ops)) {
-		ERROR("Failed to delegate controllers to monitor cgroup");
-		ret = -1;
-		goto out_abort;
-	}
+	//if (!cgroup_ops->monitor_delegate_controllers(cgroup_ops)) {
+	//	ERROR("Failed to delegate controllers to monitor cgroup");
+	//	ret = -1;
+	//	goto out_abort;
+	//}
 
 	if (geteuid() == 0 && !lxc_list_empty(&conf->id_map)) {
 		/* If the backing store is a device, mount it here and now. */
