@@ -1333,6 +1333,8 @@ int seccomp_notify_handler(int fd, uint32_t events, void *data,
 	__do_close_prot_errno int fd_mem = -EBADF;
 	int reconnect_count, ret;
 	ssize_t bytes;
+	struct iovec iov[2];
+	size_t iov_len;
 	char mem_path[6 /* /proc/ */
 		      + INTTYPE_TO_STRLEN(int64_t)
 		      + 3 /* mem */
@@ -1343,6 +1345,7 @@ int seccomp_notify_handler(int fd, uint32_t events, void *data,
 	struct seccomp_notif_resp *resp = conf->seccomp.notifier.rsp_buf;
 	int listener_proxy_fd = conf->seccomp.notifier.proxy_fd;
 	struct seccomp_notify_proxy_msg msg = {0};
+	char *cookie = conf->seccomp.notifier.cookie;
 
 	if (listener_proxy_fd < 0) {
 		ERROR("No seccomp proxy registered");
@@ -1378,10 +1381,28 @@ int seccomp_notify_handler(int fd, uint32_t events, void *data,
 	msg.monitor_pid = hdlr->monitor_pid;
 	msg.init_pid = hdlr->pid;
 
+	iov[0].iov_base = &msg;
+	iov[0].iov_len = sizeof(msg);
+	if (cookie) {
+		size_t len = strlen(cookie);
+		if (len > UINT16_MAX) {
+			ERROR("Invalid cookie length");
+			goto out;
+		}
+		msg.cookie_len = (uint16_t)len;
+
+		iov[1].iov_base = cookie;
+		iov[1].iov_len = len;
+		iov_len = 2;
+	} else {
+		iov_len = 1;
+	}
+
 	reconnect_count = 0;
 	do {
-		bytes = lxc_unix_send_fds(listener_proxy_fd, &fd_mem, 1, &msg,
-					  sizeof(msg));
+		bytes = lxc_abstract_unix_send_fds_iov(listener_proxy_fd,
+						       &fd_mem, 1, iov,
+						       iov_len);
 		if (bytes != (ssize_t)sizeof(msg)) {
 			SYSERROR("Failed to forward message to seccomp proxy");
 			if (seccomp_notify_default_answer(fd, req, resp, hdlr))

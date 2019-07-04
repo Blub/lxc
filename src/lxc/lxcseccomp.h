@@ -60,6 +60,8 @@ struct seccomp_notify_proxy_msg {
 	struct seccomp_notif_resp resp;
 	pid_t monitor_pid;
 	pid_t init_pid;
+	uint16_t cookie_len;
+	/* cookie follows */
 };
 
 struct seccomp_notify {
