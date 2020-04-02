@@ -719,7 +719,7 @@ static int lxc_cmd_get_limiting_cgroup_callback(int fd, struct lxc_cmd_req *req,
 						struct lxc_handler *handler,
 						struct lxc_epoll_descr *descr)
 {
-	return ret_errno(ENOSYS);
+	return lxc_cmd_get_cgroup_callback_do(fd, req, handler, descr, true);
 }
 
 /*
@@ -1569,7 +1569,8 @@ static int lxc_cmd_get_limiting_cgroup2_fd_callback(int fd,
 						    struct lxc_handler *handler,
 						    struct lxc_epoll_descr *descr)
 {
-	return ret_errno(ENOSYS);
+	return lxc_cmd_get_cgroup2_fd_callback_do(fd, req, handler, descr,
+						  true);
 }
 
 static int lxc_cmd_process(int fd, struct lxc_cmd_req *req,
