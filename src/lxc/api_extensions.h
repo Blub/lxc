@@ -45,6 +45,7 @@ static char *api_extensions[] = {
 	"seccomp_notify_fd_active",
 	"seccomp_proxy_send_notify_fd",
 #endif /* HAVE_DECL_SECCOMP_NOTIFY_FD */
+	"cgroup_advanced_isolation",
 	"idmapped_mounts",
 	"idmapped_mounts_v2",
 	"core_scheduling",
