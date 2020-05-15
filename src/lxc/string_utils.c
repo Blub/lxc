@@ -366,6 +366,55 @@ error_out:
 	return NULL;
 }
 
+char **lxc_string_split_at_zero(const char *string)
+{
+	__do_free char *str = NULL;
+	const char *at, *zero, *end;
+	char **tmp = NULL, **result = NULL;
+	size_t result_capacity = 0;
+	size_t result_count = 0;
+	int r, saved_errno;
+
+	if (!string)
+		return calloc(1, sizeof(char *));
+
+	at = string;
+	end = string + strlen(string) + 1;
+	while (at < end) {
+		zero = memchr(at, 0, end - at);
+
+		r = lxc_grow_array((void ***)&result, &result_capacity, result_count + 1, 16);
+		if (r < 0)
+			goto error_out;
+
+		result[result_count] = memdup(at, zero - at + 1);
+		if (!result[result_count])
+			goto error_out;
+
+		result_count++;
+		at = zero + 1;
+	}
+
+	/* if we allocated too much, reduce it */
+	tmp = realloc(result, (result_count + 1) * sizeof(char *));
+	if (!tmp)
+		goto error_out;
+
+	result = tmp;
+
+	/* Make sure we don't return uninitialized memory. */
+	if (result_count == 0)
+		*result = NULL;
+
+	return result;
+
+error_out:
+	saved_errno = errno;
+	lxc_free_array((void **)result, free);
+	errno = saved_errno;
+	return NULL;
+}
+
 static bool complete_word(char ***result, char *start, char *end, size_t *cap,
 			  size_t *cnt)
 {
