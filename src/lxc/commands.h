@@ -40,6 +40,7 @@ typedef enum {
 	LXC_CMD_GET_INIT_PIDFD,
 	LXC_CMD_GET_LIMITING_CGROUP,
 	LXC_CMD_GET_LIMITING_CGROUP2_FD,
+	LXC_CMD_GET_INFO,
 	LXC_CMD_MAX,
 } lxc_cmd_t;
 
@@ -72,6 +73,13 @@ struct lxc_cmd_console_log {
 	bool write_logfile;
 
 };
+
+struct lxc_cmd_info_response {
+	char *version;
+	char **api_extensions;
+};
+
+extern void free_lxc_cmd_info_response(struct lxc_cmd_info_response *response);
 
 extern int lxc_cmd_terminal_winch(const char *name, const char *lxcpath);
 extern int lxc_cmd_console(const char *name, int *ttynum, int *fd,
@@ -135,5 +143,7 @@ extern char *lxc_cmd_get_limiting_cgroup_path(const char *name,
 					      const char *lxcpath,
 					      const char *subsystem);
 extern int lxc_cmd_get_limiting_cgroup2_fd(const char *name, const char *lxcpath);
+extern struct lxc_cmd_info_response *lxc_cmd_get_info(const char *name,
+						      const char *lxcpath);
 
 #endif /* __commands_h */

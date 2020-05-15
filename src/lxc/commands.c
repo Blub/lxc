@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "af_unix.h"
+#include "api_extensions.h"
 #include "cgroup.h"
 #include "cgroups/cgroup2_devices.h"
 #include "commands.h"
@@ -34,6 +35,7 @@
 #include "start.h"
 #include "terminal.h"
 #include "utils.h"
+#include "version.h"
 
 /*
  * This file provides the different functions for clients to query/command the
@@ -86,6 +88,7 @@ static const char *lxc_cmd_str(lxc_cmd_t cmd)
 		[LXC_CMD_GET_INIT_PIDFD]        	= "get_init_pidfd",
 		[LXC_CMD_GET_LIMITING_CGROUP]		= "get_limiting_cgroup",
 		[LXC_CMD_GET_LIMITING_CGROUP2_FD]	= "get_limiting_cgroup2_fd",
+		[LXC_CMD_GET_INFO]			= "get_info",
 	};
 
 	if (cmd >= LXC_CMD_MAX)
@@ -1463,6 +1466,99 @@ static int lxc_cmd_get_limiting_cgroup2_fd_callback(int fd,
 						  true);
 }
 
+struct lxc_cmd_info_response *lxc_cmd_get_info(const char *name,
+					       const char *lxcpath)
+{
+	struct lxc_cmd_info_response *response = NULL;
+	char *at, *zero, *end;
+	size_t len;
+	int ret, stopped, r;
+	struct lxc_cmd_rr cmd = {
+		.req = {
+			.cmd = LXC_CMD_GET_INFO,
+		},
+	};
+
+	ret = lxc_cmd(name, &cmd, &stopped, lxcpath, NULL);
+	if (ret < 0)
+		return NULL;
+
+	if (cmd.rsp.ret < 0 || cmd.rsp.datalen < 0)
+		return NULL;
+
+	len = strnlen(cmd.rsp.data, cmd.rsp.datalen);
+	if (len == cmd.rsp.datalen)
+		return log_warn_errno(NULL, EINVAL,
+				      "Received bad response for command \"%s\"",
+				      lxc_cmd_str(cmd.req.cmd));
+
+	response = calloc(1, sizeof(*response));
+	if (!response)
+		goto out_err;
+
+	response->version = memdup(cmd.rsp.data, len + 1);
+	if (!response->version)
+		goto out_err;
+
+	response->api_extensions =
+		lxc_string_split_at_zero(cmd.rsp.data + len + 1);
+	if (!response->api_extensions)
+		goto out_err;
+
+	return response;
+
+out_err:
+	free_lxc_cmd_info_response(response);
+	return log_warn_errno(NULL, ENOMEM,
+			      "Failed to allocate response for command \"%s\"",
+			      lxc_cmd_str(cmd.req.cmd));
+}
+
+void free_lxc_cmd_info_response(struct lxc_cmd_info_response *response) {
+	if (!response)
+		return;
+	free(response->version);
+	lxc_free_array((void**)response->api_extensions, free);
+	free(response);
+}
+
+static int lxc_cmd_get_info_callback(int fd, struct lxc_cmd_req *req,
+				     struct lxc_handler *handler,
+				     struct lxc_epoll_descr *descr)
+{
+	__do_free char *response = NULL;
+	struct lxc_cmd_rsp rsp;
+	size_t size, at, i;
+	int ret;
+
+	size = strlen(LXC_VERSION) + 1;
+	for (i = 0; i < nr_api_extensions; i++)
+		size += strlen(api_extensions[i]) + 1;
+
+	response = malloc(size);
+	if (!response)
+		return log_warn_errno(-1, ENOMEM,
+				      "Failed to allocate response for command \"%s\"",
+				      lxc_cmd_str(req->cmd));
+
+	rsp.datalen = strlen(LXC_VERSION + 1);
+	memcpy(response, LXC_VERSION, rsp.datalen);
+	for (i = 0; i < nr_api_extensions; i++) {
+		size_t len = strlen(api_extensions[i]) + 1;
+		memcpy(response + rsp.datalen, api_extensions[i], len);
+		rsp.datalen += len;
+	}
+
+	rsp.ret = 0;
+	rsp.data = response;
+
+	ret = lxc_cmd_rsp_send(fd, &rsp);
+	if (ret < 0)
+		return LXC_CMD_REAP_CLIENT_FD;
+
+	return 0;
+}
+
 static int lxc_cmd_process(int fd, struct lxc_cmd_req *req,
 			   struct lxc_handler *handler,
 			   struct lxc_epoll_descr *descr)
@@ -1492,6 +1588,7 @@ static int lxc_cmd_process(int fd, struct lxc_cmd_req *req,
 		[LXC_CMD_GET_INIT_PIDFD]                = lxc_cmd_get_init_pidfd_callback,
 		[LXC_CMD_GET_LIMITING_CGROUP]           = lxc_cmd_get_limiting_cgroup_callback,
 		[LXC_CMD_GET_LIMITING_CGROUP2_FD]       = lxc_cmd_get_limiting_cgroup2_fd_callback,
+		[LXC_CMD_GET_INFO]                      = lxc_cmd_get_info_callback,
 	};
 
 	if (req->cmd >= LXC_CMD_MAX)
