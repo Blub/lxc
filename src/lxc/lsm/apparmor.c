@@ -102,6 +102,7 @@ static const char AA_PROFILE_BASE[] =
 "  mount fstype=debugfs -> /sys/kernel/debug/,\n"
 "  deny mount fstype=debugfs -> /var/lib/ureadahead/debugfs/,\n"
 "  mount fstype=proc -> /proc/,\n"
+"  mount fstype=proc -> /run/systemd/unit-root/proc/,\n"
 "  mount fstype=sysfs -> /sys/,\n"
 "  mount options=(rw, nosuid, nodev, noexec, remount) -> /sys/,\n"
 "  deny /sys/firmware/efi/efivars/** rwklx,\n"

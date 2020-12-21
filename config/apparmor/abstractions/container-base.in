@@ -82,6 +82,7 @@
   mount fstype=debugfs -> /sys/kernel/debug/,
   deny mount fstype=debugfs -> /var/lib/ureadahead/debugfs/,
   mount fstype=proc -> /proc/,
+  mount fstype=proc -> /run/systemd/unit-root/proc/,
   mount fstype=sysfs -> /sys/,
   mount options=(rw, nosuid, nodev, noexec, remount) -> /sys/,
   deny /sys/firmware/efi/efivars/** rwklx,
