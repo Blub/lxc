@@ -209,6 +209,30 @@ static void print_stats(struct lxc_container *c)
 			printf("%-15s %s\n", "CPU use:", buf);
 		}
 		fflush(stdout);
+	} else {
+		/* cpuacct.usage is cgroupv1 but cpu.stat exists in both, we
+		 * only check it when cpuacct.usage was not available */
+		ret = c->get_cgroup_item(c, "cpu.stat", buf, sizeof(buf));
+	}
+	if (ret > 0 && (size_t)ret < sizeof(buf)) {
+		char *usage = strstr(buf, "usage_usec ");
+		char *newline = NULL;
+		if (usage) {
+			/* we only get here with the v2 controller */
+			usage += sizeof("usage_usec ") - 1;
+			newline = strchr(usage, '\n');
+		}
+
+		if (newline) {
+			*newline = 0;
+			if (humanize) {
+				float seconds = strtof(usage, NULL) / 1000000.0;
+				printf("%-15s %.2f seconds\n", "CPU use:", seconds);
+			} else {
+				printf("%-15s %s\n", "CPU use:", usage);
+			}
+			fflush(stdout);
+		}
 	}
 
 	ret = c->get_cgroup_item(c, "blkio.throttle.io_service_bytes", buf, sizeof(buf));
@@ -235,7 +259,9 @@ static void print_stats(struct lxc_container *c)
 		const char *name;
 		const char *file;
 	} lxstat[] = {
+		/* only 1 of the first 2 will be available due to cgroup versioning */
 		{ "Memory use:", "memory.usage_in_bytes" },
+		{ "Memory use:", "memory.current" },
 		{ "KMem use:",   "memory.kmem.usage_in_bytes" },
 		{ NULL, NULL },
 	};
