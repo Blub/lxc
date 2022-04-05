@@ -62,6 +62,8 @@ static int sort_reverse = 0;
 static struct termios oldtios;
 static struct container_stats *container_stats = NULL;
 static int ct_alloc_cnt = 0;
+static int memory_v = 0;
+static int cpuacct_v = 0;
 
 static int my_parser(struct lxc_arguments *args, int c, char *arg)
 {
@@ -194,65 +196,106 @@ static void size_humanize(unsigned long long val, char *buf, size_t bufsz)
 		fprintf(stderr, "Failed to create string\n");
 }
 
-static uint64_t stat_get_int(struct lxc_container *c, const char *item)
+static int64_t stat_get_int(struct lxc_container *c, const char *item)
 {
 	char buf[80];
 	int len;
-	uint64_t val;
+	int64_t val;
 
 	len = c->get_cgroup_item(c, item, buf, sizeof(buf));
 	if (len <= 0) {
-		fprintf(stderr, "Unable to read cgroup item %s\n", item);
-		return 0;
+		errno = ENOENT;
+		return -1;
 	}
 
-	val = strtoull(buf, NULL, 0);
+	errno = 0;
+	val = strtoll(buf, NULL, 0);
 	return val;
 }
 
-static uint64_t stat_match_get_int(struct lxc_container *c, const char *item,
-				   const char *match, int column)
+static uint64_t must_stat_get_int(struct lxc_container *c, const char *item)
+{
+	int64_t value = stat_get_int(c, item);
+	if (value < 0) {
+		fprintf(stderr, "Unable to read memory cgroup item %s\n", item);
+		return 0;
+	}
+	return (uint64_t)value;
+}
+
+#define __free_string_array __attribute__((__cleanup__(cleanup_array)))
+static void cleanup_array(char ***array) {
+	lxc_free_array((void**)*array, free);
+	*array = NULL;
+}
+
+static int get_cpuacct_info(struct lxc_container *c, struct stats *stats)
 {
 	char buf[4096];
-	int i,j,len;
-	uint64_t val = 0;
-	char **lines, **cols;
-	size_t matchlen;
 
-	len = c->get_cgroup_item(c, item, buf, sizeof(buf));
-	if (len <= 0) {
-		fprintf(stderr, "Unable to read cgroup item %s\n", item);
-		goto out;
+	if (cpuacct_v < 0)
+		return -1;
+
+	int len;
+	if (cpuacct_v <= 1) {
+		len = c->get_cgroup_item(c, "cpuacct.stat", buf, sizeof(buf));
+		if (len > 0)
+			cpuacct_v = 1;
 	}
 
-	lines = lxc_string_split_and_trim(buf, '\n');
+
+	if (cpuacct_v == 2 || len < 0) {
+		len = c->get_cgroup_item(c, "cpu.stat", buf, sizeof(buf));
+		if (len > 0)
+			cpuacct_v = 2;
+	}
+
+	if (cpuacct_v <= 0) {
+		fprintf(stderr, "Unable to read cgroup items cpuacct.stat or cpu.stat\n");
+		return -1;
+	}
+
+	__free_string_array char **lines = lxc_string_split_and_trim(buf, '\n');
 	if (!lines)
-		goto out;
+		return -1;
 
-	matchlen = strlen(match);
-	for (i = 0; lines[i]; i++) {
-		if (strncmp(lines[i], match, matchlen) == 0) {
-			cols = lxc_string_split_and_trim(lines[i], ' ');
-			if (!cols)
-				goto err1;
+	for (int i = 0; lines[i]; i++) {
+		uint64_t *value;
+		uint64_t fac = 1, div = 1;
 
-			for (j = 0; cols[j]; j++) {
-				if (j == column) {
-					val = strtoull(cols[j], NULL, 0);
-					break;
-				}
+		if (cpuacct_v == 1) {
+			if (strncmp(lines[i], "user ", sizeof("user ") - 1) == 0)
+				value = &stats->cpu_use_user;
+			else if (strncmp(lines[i], "system ", sizeof("system ") - 1) == 0)
+				value = &stats->cpu_use_sys;
+			else
+				continue;
+		} else if (cpuacct_v == 2) {
+			/* v2 uses usec */
+			if (strncmp(lines[i], "usage_usec ", sizeof("usage_usec ") - 1) == 0) {
+				value = &stats->cpu_use_nanos;
+				fac = 1000;
+			} else if (strncmp(lines[i], "user_usec ", sizeof("user_usec ") - 1) == 0) {
+				value = &stats->cpu_use_user;
+				div = 1000000ULL / USER_HZ;
+			} else if (strncmp(lines[i], "system_usec ", sizeof("system_usec ") - 1) == 0) {
+				value = &stats->cpu_use_sys;
+				div = 1000000ULL / USER_HZ;
 			}
-
-			lxc_free_array((void **)cols, free);
-			break;
+			else
+				continue;
+		} else {
+			continue;
 		}
+
+		__free_string_array char **cols = lxc_string_split_and_trim(lines[i], ' ');
+		if (!cols || !cols[0] || !cols[1])
+			return -1;
+
+		*value = strtoull(cols[1], NULL, 0) * fac / div;
 	}
 
-err1:
-	lxc_free_array((void **)lines, free);
-
-out:
-	return val;
+	return 0;
 }
 
 /*
@@ -315,15 +358,44 @@ out:
 static void stats_get(struct lxc_container *c, struct container_stats *ct, struct stats *total)
 {
 	ct->c = c;
-	ct->stats->mem_used      = stat_get_int(c, "memory.usage_in_bytes");
-	ct->stats->mem_limit     = stat_get_int(c, "memory.limit_in_bytes");
-	ct->stats->memsw_used    = stat_get_int(c, "memory.memsw.usage_in_bytes");
-	ct->stats->memsw_limit   = stat_get_int(c, "memory.memsw.limit_in_bytes");
-	ct->stats->kmem_used     = stat_get_int(c, "memory.kmem.usage_in_bytes");
-	ct->stats->kmem_limit    = stat_get_int(c, "memory.kmem.limit_in_bytes");
-	ct->stats->cpu_use_nanos = stat_get_int(c, "cpuacct.usage");
-	ct->stats->cpu_use_user  = stat_match_get_int(c, "cpuacct.stat", "user", 1);
-	ct->stats->cpu_use_sys   = stat_match_get_int(c, "cpuacct.stat", "system", 1);
+	if (!memory_v) {
+		int64_t value = stat_get_int(c, "memory.usage_in_bytes");
+		if (value < 0 && errno == ENOENT)
+			memory_v = 2;
+		else if (value < 0)
+			memory_v = -1;
+		else
+			memory_v = 1;
+
+	}
+
+	if (memory_v == 2) {
+		ct->stats->mem_used    = must_stat_get_int(c, "memory.current");
+		ct->stats->mem_limit   = must_stat_get_int(c, "memory.max");
+		ct->stats->memsw_used  = must_stat_get_int(c, "memory.swap.current");
+		ct->stats->memsw_limit = must_stat_get_int(c, "memory.swap.max");
+	} else if (memory_v == 1) {
+		ct->stats->mem_used    = must_stat_get_int(c, "memory.usage_in_bytes");
+		ct->stats->mem_limit   = must_stat_get_int(c, "memory.limit_in_bytes");
+		ct->stats->memsw_used  = must_stat_get_int(c, "memory.memsw.usage_in_bytes");
+		ct->stats->memsw_limit = must_stat_get_int(c, "memory.memsw.limit_in_bytes");
+		ct->stats->kmem_used   = must_stat_get_int(c, "memory.kmem.usage_in_bytes");
+		ct->stats->kmem_limit  = must_stat_get_int(c, "memory.kmem.limit_in_bytes");
+	}
+
+	if (!cpuacct_v) {
+		int64_t value = stat_get_int(c, "cpuacct.usage");
+		if (value < 0 && errno == ENOENT)
+			cpuacct_v = 2;
+		else if (value < 0)
+			cpuacct_v = -1;
+		else
+			cpuacct_v = 1;
+	}
+
+	if (cpuacct_v == 1)
+		ct->stats->cpu_use_nanos = (uint64_t)stat_get_int(c, "cpuacct.usage");
+	get_cpuacct_info(c, ct->stats);
 
 	stat_get_blk_stats(c, "blkio.throttle.io_service_bytes", &ct->stats->io_service_bytes);
 	stat_get_blk_stats(c, "blkio.throttle.io_serviced", &ct->stats->io_serviced);
@@ -349,20 +421,30 @@ static void stats_print_header(struct stats *stats)
 	printf(TERMRVRS TERMBOLD);
 	printf("%-18s %12s %12s %12s %36s %10s", "Container", "CPU",  "CPU",  "CPU",  "BlkIO", "Mem");
 
-	if (stats->memsw_used > 0)
-		printf(" %10s", "MemSw");
+	if (memory_v == 2) {
+		if (stats->memsw_used > 0)
+			printf(" %10s", "Swap");
+	} else if (memory_v == 1) {
+		if (stats->memsw_used > 0)
+			printf(" %10s", "MemSw");
 
-	if (stats->kmem_used > 0)
-		printf(" %10s", "KMem");
+		if (stats->kmem_used > 0)
+			printf(" %10s", "KMem");
+	}
 	printf("\n");
 
 	printf("%-18s %12s %12s %12s %36s %10s", "Name",      "Used", "Sys",  "User", "Total(Read/Write)", "Used");
 
-	if (stats->memsw_used > 0)
-		printf(" %10s", "Used");
+	if (memory_v == 2) {
+		if (stats->memsw_used > 0)
+			printf(" %10s", "Used");
+	} else if (memory_v == 1) {
+		if (stats->memsw_used > 0)
+			printf(" %10s", "Used");
 
-	if (stats->kmem_used > 0)
-		printf(" %10s", "Used");
+		if (stats->kmem_used > 0)
+			printf(" %10s", "Used");
+	}
 
 	printf("\n");
 	printf(TERMNORM);
