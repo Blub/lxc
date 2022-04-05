@@ -534,7 +534,7 @@ static void ct_realloc(int active_cnt)
 		}
 
 		for (i = 0; i < active_cnt; i++) {
-			container_stats[i].stats = malloc(sizeof(*container_stats[0].stats));
+			container_stats[i].stats = calloc(1, sizeof(*container_stats[0].stats));
 			if (!container_stats[i].stats) {
 				fprintf(stderr, "Cannot alloc mem\n");
 				exit(EXIT_FAILURE);
