@@ -481,6 +481,8 @@ static int ls_get(struct ls **m, size_t *size, const struct lxc_arguments *args,
 				l->ipv6 = ls_get_ips(c, "inet6");
 
 				tmp = ls_get_cgroup_item(c, "memory.usage_in_bytes");
+				if (!tmp)
+					tmp = ls_get_cgroup_item(c, "memory.current");
 				if (tmp) {
 					l->ram = strtoull(tmp, NULL, 0);
 					l->ram = l->ram / 1024 /1024;
@@ -687,19 +689,23 @@ static double ls_get_swap(struct lxc_container *c)
 	if (!stat)
 		return num;
 
-	swap = strstr(stat, "\nswap");
-	if (!swap)
-		return num;
+	swap = strstr(stat, "\nswap ");
+	if (swap) {
+		/* start_of_swap_value = '\n' + strlen(swap) + ' ' */
+		swap = 1 + swap + 4 + 1;
 
-	/* start_of_swap_value = '\n' + strlen(swap) + ' ' */
-	swap = 1 + swap + 4 + 1;
+		/* find end of swap value */
+		tmp = strchr(swap, '\n');
+		if (!tmp)
+			return num;
 
-	/* find end of swap value */
-	tmp = strchr(swap, '\n');
-	if (!tmp)
-		return num;
-
-	*tmp = '\0';
+		*tmp = '\0';
+	} else {
+		/* try cgroupv2 instead */
+		swap = ls_get_cgroup_item(c, "memory.swap.current");
+		if (!swap)
+			return num;
+	}
 
 	num = strtoull(swap, NULL, 0);
 	num = num / 1024 / 1024;
