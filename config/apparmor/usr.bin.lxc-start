@@ -1,5 +1,7 @@
 #include <tunables/global>
 
+abi <abi/4.0>,
+
 /usr/bin/lxc-start flags=(attach_disconnected) {
   #include <abstractions/lxc/start-container>
 }

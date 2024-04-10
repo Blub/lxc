@@ -4,4 +4,6 @@
 
 #include <tunables/global>
 
+abi <abi/4.0>,
+
 #include <lxc>

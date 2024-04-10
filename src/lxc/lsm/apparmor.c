@@ -748,6 +748,7 @@ static char *get_apparmor_profile_content(struct lsm_ops *ops, struct lxc_conf *
 
 	profile = must_concat(NULL,
 "#include <tunables/global>\n"
+"abi <abi/4.0>,\n"
 "profile \"", profile_name_full, "\" flags=(attach_disconnected,mediate_deleted) {\n",
 	                      NULL);
 	size = strlen(profile);
