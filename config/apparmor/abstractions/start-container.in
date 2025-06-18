@@ -7,6 +7,7 @@
   dbus,
   signal,
   ptrace,
+  userns,
 
   # currently blocked by apparmor bug
   mount -> /usr/lib*/*/lxc/{**,},
